@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Chess.com Game Review (Local Stockfish)",
+  "name": "Wazir",
   "version": "0.2.2",
   "description": "Analyze finished Chess.com games locally with Stockfish 17.1 Lite: accuracy, ACPL, move quality.",
   "action": {
-    "default_title": "Analyze current Chess.com game",
+    "default_title": "Wazir",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/pawn-16.png",
