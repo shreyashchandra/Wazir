@@ -1,0 +1,22 @@
+{
+  "name": "chess-review",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "chess.js": "^1.1.0",
+    "stockfish": "^17.1.0"
+  },
+  "devDependencies": {
+    "sharp": "^0.34.4"
+  }
+}

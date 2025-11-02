@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Chess.com Game Review (Local Stockfish)",
+  "version": "0.2.2",
+  "description": "Analyze finished Chess.com games locally with Stockfish 17.1 Lite: accuracy, ACPL, move quality.",
+  "action": {
+    "default_title": "Analyze current Chess.com game",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/pawn-16.png",
+      "32": "icons/pawn-32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/pawn-16.png",
+    "32": "icons/pawn-32.png",
+    "48": "icons/pawn-48.png",
+    "128": "icons/pawn-128.png"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["https://www.chess.com/*", "http://localhost:3100/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "stockfish/stockfish-17.1-lite-single-03e3232.js",
+        "stockfish/stockfish-17.1-lite-single-03e3232.wasm"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

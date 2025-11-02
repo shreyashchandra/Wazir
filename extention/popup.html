@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Chess.com Game Review</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <h3>WAZIR</h3>
+
+    <div class="card" style="margin-bottom: 8px">
+      <div class="controls">
+        <button id="btn-auto">Get PGN from current page</button>
+        <div class="right">
+          <label>
+            Depth
+            <select id="depth">
+              <option value="10">d10</option>
+              <option value="14">d14</option>
+              <option value="18">d18</option>
+              <option value="20" selected>d20</option>
+            </select>
+          </label>
+          <label>
+            ms
+            <input id="ms" type="number" value="500" min="40" max="10000" />
+          </label>
+          <label>
+            MultiPV
+            <select id="mpv">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+            </select>
+          </label>
+          <button id="analyze">Analyze</button>
+          <button id="board-view" title="Open board review" disabled>
+            Board view
+          </button>
+        </div>
+      </div>
+
+      <div id="auto-status" class="small muted" style="margin: 6px 0 8px 0">
+        Paste PGN below if auto-fetch fails.
+      </div>
+
+      <textarea id="pgn" placeholder="Paste PGN here..."></textarea>
+
+      <div class="progress" style="margin-top: 8px">
+        <div id="bar"></div>
+      </div>
+      <div id="progress" class="small muted" style="margin-top: 4px"></div>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <div class="kpis">
+          <div class="kpi">
+            <h4>White Accuracy</h4>
+            <div id="w-acc" class="big">-</div>
+          </div>
+          <div class="kpi">
+            <h4>Black Accuracy</h4>
+            <div id="b-acc" class="big">-</div>
+          </div>
+          <div class="kpi">
+            <h4>White ACPL</h4>
+            <div id="w-acpl" class="big">-</div>
+          </div>
+          <div class="kpi">
+            <h4>Black ACPL</h4>
+            <div id="b-acpl" class="big">-</div>
+          </div>
+        </div>
+
+        <div style="margin-top: 8px">
+          <div class="badges" id="w-badges"></div>
+          <div class="badges" id="b-badges" style="margin-top: 6px"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div id="title" style="font-weight: 600; margin-bottom: 8px">-</div>
+        <pre id="notes" class="small muted" style="white-space: pre-wrap"></pre>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 8px">
+      <div style="font-weight: 600; margin-bottom: 6px">Move-by-move</div>
+      <div class="table" id="moves"></div>
+    </div>
+
+    <!-- Board Review Card -->
+    <div id="board-card" class="card" style="margin-top: 8px; display: none">
+      <div style="display: flex; gap: 12px; align-items: flex-start">
+        <div>
+          <div style="position: relative; width: 520px; height: 520px">
+            <canvas
+              id="board-canvas"
+              width="520"
+              height="520"
+              style="
+                display: block;
+                border: 1px solid #444;
+                border-radius: 6px;
+                background: #fff;
+              "
+            ></canvas>
+            <div
+              id="coords"
+              style="
+                position: absolute;
+                inset: 0;
+                pointer-events: none;
+                font: 11px system-ui, sans-serif;
+                color: #222;
+              "
+            ></div>
+          </div>
+          <div
+            style="
+              margin-top: 8px;
+              display: flex;
+              gap: 6px;
+              align-items: center;
+            "
+          >
+            <button id="btn-first">|<</button>
+            <button id="btn-prev"><</button>
+            <div
+              id="ply-indicator"
+              class="muted"
+              style="min-width: 90px; text-align: center"
+            >
+              -/-
+            </div>
+            <button id="btn-next">></button>
+            <button id="btn-last">>|</button>
+            <div style="flex: 1"></div>
+            <label
+              class="small muted"
+              style="display: flex; align-items: center; gap: 6px"
+            >
+              Flip
+              <input id="flip" type="checkbox" />
+            </label>
+            <button id="btn-exit">Back</button>
+          </div>
+        </div>
+
+        <div style="flex: 1; min-width: 260px">
+          <div style="font-weight: 600; margin-bottom: 6px">Position info</div>
+          <div id="pos-header" class="small muted">-</div>
+          <div
+            style="
+              display: flex;
+              gap: 8px;
+              align-items: center;
+              margin-top: 8px;
+            "
+          >
+            <div class="small muted">MultiPV</div>
+            <div>
+              <button class="pv-btn" data-pv="1">#1</button>
+              <button class="pv-btn" data-pv="2">#2</button>
+              <button class="pv-btn" data-pv="3">#3</button>
+            </div>
+          </div>
+          <div id="best-move" style="margin-top: 8px; font-family: monospace">
+            Best: -
+          </div>
+          <div
+            id="pv-line"
+            class="small"
+            style="margin-top: 4px; white-space: pre-wrap"
+          >
+            PV: -
+          </div>
+          <div id="eval-line" class="small muted" style="margin-top: 4px">
+            Eval: -
+          </div>
+
+          <div style="font-weight: 600; margin-top: 10px">Moves</div>
+          <div
+            id="mini-moves"
+            style="
+              max-height: 220px;
+              overflow: auto;
+              padding: 6px;
+              border: 1px solid #333;
+              border-radius: 4px;
+              font: 12px/1.4 system-ui, sans-serif;
+            "
+          ></div>
+        </div>
+      </div>
+      <div class="small muted" style="margin-top: 8px">
+        Tips: Blue arrow shows the best move suggestion. Green squares mark the
+        last played move.
+      </div>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
