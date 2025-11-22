@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Wazir",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Analyze finished Chess.com games locally with Stockfish 17.1 Lite: accuracy, ACPL, move quality.",
   "action": {
     "default_title": "Wazir",
@@ -18,7 +18,10 @@
     "128": "icons/pawn-128.png"
   },
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
-  "host_permissions": ["https://www.chess.com/*", "http://localhost:3100/*"],
+  "host_permissions": [
+    "https://www.chess.com/*",
+    "https://chess-pgn-api.shreyash-chandra123.workers.dev/*"
+  ],
   "content_scripts": [
     {
       "matches": ["https://www.chess.com/*"],
@@ -28,10 +31,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": [
-        "stockfish/stockfish-17.1-lite-single-03e3232.js",
-        "stockfish/stockfish-17.1-lite-single-03e3232.wasm"
-      ],
+      "resources": ["stockfish/*.wasm", "stockfish/*.js", "pieces/*.png"],
       "matches": ["<all_urls>"]
     }
   ],

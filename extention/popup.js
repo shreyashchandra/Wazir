@@ -1,6 +1,8 @@
+/* popup.js - full updated file (PNG Neo pieces, high-quality smoothing, best-move-after fix) */
+
 import { Chess } from "./lib/chess.js";
 
-const API_ORIGIN = "http://localhost:3100";
+const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
 
 /* ---------- Force sane popup width ---------- */
 document.documentElement.style.minWidth = "920px";
@@ -213,6 +215,13 @@ async function getActiveTabId() {
   if (!tab || !tab.id) throw new Error("No active tab");
   return tab.id;
 }
+
+// async function logTabId() {
+//   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+//   if (!tab || !tab.id) throw new Error("No active tab");
+//   console.log(tab);
+//   return tab;
+// }
 
 async function sendMessageToTab(tabId, msg) {
   return new Promise((resolve, reject) => {
@@ -631,110 +640,53 @@ function extractSanTokens(pgn) {
 
 /* ============================ BOARD VIEW ============================== */
 
+/* Colors + sizes */
 const LIGHT = "#EEEDD2";
 const DARK = "#769656";
 const H_LAST = "rgba(46, 204, 113, 0.6)";
 const H_BEST = "rgba(52, 152, 219, 0.65)";
-const SIZE = 520;
-const SQ = SIZE / 8;
+const SIZE = 520; // canvas size (px)
+const SQ = SIZE / 8; // square size (px)
 
-const PIECE_DRAW = {
-  // Minimal but crisp canvas shapes to mimic a classic set
-  p: (g, x, y, w, color) => {
-    g.fillStyle = color ? "#111" : "#fff";
-    g.strokeStyle = "#222";
-    g.lineWidth = 2;
-    g.beginPath();
-    g.arc(x + w / 2, y + w / 2 - 4, w * 0.24, 0, Math.PI * 2);
-    g.fill();
-    g.stroke();
-    g.beginPath();
-    g.moveTo(x + w * 0.3, y + w * 0.55);
-    g.quadraticCurveTo(x + w * 0.5, y + w * 0.4, x + w * 0.7, y + w * 0.55);
-    g.lineTo(x + w * 0.7, y + w * 0.8);
-    g.lineTo(x + w * 0.3, y + w * 0.8);
-    g.closePath();
-    g.fill();
-    g.stroke();
-  },
-  n: (g, x, y, w, color) => {
-    g.fillStyle = color ? "#111" : "#fff";
-    g.strokeStyle = "#222";
-    g.lineWidth = 2;
-    g.beginPath();
-    g.moveTo(x + w * 0.75, y + w * 0.75);
-    g.quadraticCurveTo(x + w * 0.2, y + w * 0.8, x + w * 0.25, y + w * 0.5);
-    g.quadraticCurveTo(x + w * 0.4, y + w * 0.2, x + w * 0.65, y + w * 0.25);
-    g.quadraticCurveTo(x + w * 0.7, y + w * 0.45, x + w * 0.6, y + w * 0.5);
-    g.lineTo(x + w * 0.75, y + w * 0.75);
-    g.fill();
-    g.stroke();
-  },
-  b: (g, x, y, w, color) => {
-    g.fillStyle = color ? "#111" : "#fff";
-    g.strokeStyle = "#222";
-    g.lineWidth = 2;
-    g.beginPath();
-    g.ellipse(x + w / 2, y + w / 2, w * 0.22, w * 0.3, 0, 0, Math.PI * 2);
-    g.fill();
-    g.stroke();
-    g.beginPath();
-    g.rect(x + w * 0.35, y + w * 0.7, w * 0.3, w * 0.1);
-    g.fill();
-    g.stroke();
-  },
-  r: (g, x, y, w, color) => {
-    g.fillStyle = color ? "#111" : "#fff";
-    g.strokeStyle = "#222";
-    g.lineWidth = 2;
-    g.beginPath();
-    g.rect(x + w * 0.2, y + w * 0.25, w * 0.6, w * 0.5);
-    g.fill();
-    g.stroke();
-    g.beginPath();
-    g.rect(x + w * 0.15, y + w * 0.75, w * 0.7, w * 0.1);
-    g.fill();
-    g.stroke();
-  },
-  q: (g, x, y, w, color) => {
-    g.fillStyle = color ? "#111" : "#fff";
-    g.strokeStyle = "#222";
-    g.lineWidth = 2;
-    g.beginPath();
-    g.arc(x + w * 0.3, y + w * 0.35, w * 0.07, 0, Math.PI * 2);
-    g.arc(x + w * 0.5, y + w * 0.3, w * 0.07, 0, Math.PI * 2);
-    g.arc(x + w * 0.7, y + w * 0.35, w * 0.07, 0, Math.PI * 2);
-    g.fill();
-    g.beginPath();
-    g.ellipse(x + w / 2, y + w * 0.6, w * 0.3, w * 0.22, 0, 0, Math.PI * 2);
-    g.fill();
-    g.stroke();
-    g.beginPath();
-    g.rect(x + w * 0.3, y + w * 0.78, w * 0.4, w * 0.08);
-    g.fill();
-    g.stroke();
-  },
-  k: (g, x, y, w, color) => {
-    g.fillStyle = color ? "#111" : "#fff";
-    g.strokeStyle = "#222";
-    g.lineWidth = 2;
-    g.beginPath();
-    g.rect(x + w * 0.35, y + w * 0.28, w * 0.3, w * 0.35);
-    g.fill();
-    g.stroke();
-    g.beginPath();
-    g.moveTo(x + w * 0.5, y + w * 0.18);
-    g.lineTo(x + w * 0.5, y + w * 0.28);
-    g.moveTo(x + w * 0.44, y + w * 0.23);
-    g.lineTo(x + w * 0.56, y + w * 0.23);
-    g.stroke();
-    g.beginPath();
-    g.rect(x + w * 0.28, y + w * 0.7, w * 0.44, w * 0.1);
-    g.fill();
-    g.stroke();
-  },
-};
+/* ------------------ PNG piece preloading (local pieces) -------------- */
+const pieceKeys = [
+  "wK",
+  "wQ",
+  "wR",
+  "wB",
+  "wN",
+  "wP",
+  "bK",
+  "bQ",
+  "bR",
+  "bB",
+  "bN",
+  "bP",
+];
 
+const IMAGES = {}; // key -> HTMLImageElement
+
+function preloadPieces() {
+  const promises = [];
+  for (const k of pieceKeys) {
+    const img = new Image();
+    img.src = chrome.runtime.getURL(`pieces/${k}.png`);
+    IMAGES[k] = img;
+    promises.push(
+      new Promise((res) => {
+        if (img.complete) return res();
+        img.onload = () => res();
+        img.onerror = () => {
+          console.warn("Failed to load piece", k, img.src);
+          res();
+        };
+      })
+    );
+  }
+  return Promise.all(promises);
+}
+
+/* ------------------- board state ------------------ */
 let boardSummary = null;
 let boardGame = null;
 let boardStartFen = undefined;
@@ -780,16 +732,31 @@ function drawBoardBase() {
   coordsLayer.innerHTML = coordHtml.join("");
 }
 
+/* Draw pieces using preloaded PNG images for Neo look */
 function drawPieces(game) {
-  const board = game.board();
+  // enable smoothing for high-quality downscale
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
       const sq = "abcdefgh"[f] + (8 - r);
       const piece = game.get(sq);
       if (!piece) continue;
       const { x, y } = sqToXY(sq);
-      const draw = PIECE_DRAW[piece.type];
-      if (draw) draw(ctx, x + 4, y + 4, SQ - 8, piece.color === "b");
+
+      const key = (piece.color === "w" ? "w" : "b") + piece.type.toUpperCase();
+      const img = IMAGES[key];
+      if (img && img.complete) {
+        const pad = Math.round(SQ * 0.03); // small padding for nice fit
+        ctx.drawImage(img, x + pad, y + pad, SQ - pad * 2, SQ - pad * 2);
+      } else {
+        // fallback: simple circle (should rarely run)
+        ctx.fillStyle = piece.color === "b" ? "#111" : "#fff";
+        ctx.beginPath();
+        ctx.arc(x + SQ / 2, y + SQ / 2 - 4, SQ * 0.24, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 }
@@ -820,14 +787,14 @@ function drawArrow(from, to, color) {
 
   const ux = dx / len;
   const uy = dy / len;
-  const head = 14;
-  const back = 8;
+  const head = Math.max(10, SQ * 0.18);
+  const back = Math.max(6, SQ * 0.1);
 
   ctx.save();
-  ctx.lineWidth = 8;
+  ctx.lineWidth = Math.max(6, SQ * 0.11);
   ctx.lineCap = "round";
   ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = 0.95;
 
   // shaft
   ctx.beginPath();
@@ -866,6 +833,7 @@ function toSANListFromPV(fen, pv) {
   return sanList;
 }
 
+/* ------------------ gotoPly: show best move AFTER last played move ---------------- */
 function gotoPly(ply) {
   currentPly = Math.max(0, Math.min(ply, boardPerMove.length));
   const base = new Chess(boardStartFen);
@@ -887,8 +855,12 @@ function gotoPly(ply) {
     }
   }
 
-  // Best move arrow for selected PV at current node
-  const node = boardPerMove[currentPly] || null;
+  // Best move arrow: show engine suggestion AFTER the last played move
+  let node = null;
+  if (currentPly > 0) {
+    node = boardPerMove[currentPly - 1];
+  }
+
   if (node && node.pvLines && node.pvLines[selectedPV]) {
     const bestUci = node.pvLines[selectedPV].move || null;
     if (bestUci) {
@@ -904,7 +876,7 @@ function gotoPly(ply) {
   const turn = base.turn() === "w" ? "White to move" : "Black to move";
   posHeader.textContent = `${turn} | FEN: ${base.fen()}`;
 
-  // Best move + PV text
+  // Best move + PV text (based on node above)
   if (node && node.pvLines && node.pvLines[selectedPV]) {
     const info = node.pvLines[selectedPV];
     const bestSAN = uciToSAN(base.fen(), info.move);
@@ -1004,7 +976,10 @@ pvButtons.forEach((b) =>
   })
 );
 
-boardBtn.addEventListener("click", () => {
+boardBtn.addEventListener("click", async () => {
+  // ensure pieces loaded before showing board
+  await preloadPieces();
+
   if (!lastSummary) {
     // allow board from PGN-only if user didn’t analyze
     const pgn = pgnEl.value.trim();
@@ -1027,3 +1002,7 @@ boardBtn.addEventListener("click", () => {
     buildBoard(lastSummary);
   }
 });
+
+// window.onload = () => {
+//   logTabId();
+// };

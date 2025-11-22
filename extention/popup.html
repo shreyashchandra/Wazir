@@ -7,7 +7,6 @@
   </head>
   <body>
     <h3>WAZIR</h3>
-
     <div class="card" style="margin-bottom: 8px">
       <div class="controls">
         <button id="btn-auto">Get PGN from current page</button>
@@ -22,8 +21,7 @@
             </select>
           </label>
           <label>
-            ms
-            <input id="ms" type="number" value="500" min="40" max="10000" />
+            ms <input id="ms" type="number" value="500" min="40" max="10000" />
           </label>
           <label>
             MultiPV
@@ -39,19 +37,13 @@
           </button>
         </div>
       </div>
-
       <div id="auto-status" class="small muted" style="margin: 6px 0 8px 0">
         Paste PGN below if auto-fetch fails.
       </div>
-
       <textarea id="pgn" placeholder="Paste PGN here..."></textarea>
-
-      <div class="progress" style="margin-top: 8px">
-        <div id="bar"></div>
-      </div>
+      <div class="progress" style="margin-top: 8px"><div id="bar"></div></div>
       <div id="progress" class="small muted" style="margin-top: 4px"></div>
     </div>
-
     <div class="row">
       <div class="card">
         <div class="kpis">
@@ -72,24 +64,20 @@
             <div id="b-acpl" class="big">-</div>
           </div>
         </div>
-
         <div style="margin-top: 8px">
           <div class="badges" id="w-badges"></div>
           <div class="badges" id="b-badges" style="margin-top: 6px"></div>
         </div>
       </div>
-
       <div class="card">
         <div id="title" style="font-weight: 600; margin-bottom: 8px">-</div>
         <pre id="notes" class="small muted" style="white-space: pre-wrap"></pre>
       </div>
     </div>
-
     <div class="card" style="margin-top: 8px">
       <div style="font-weight: 600; margin-bottom: 6px">Move-by-move</div>
       <div class="table" id="moves"></div>
     </div>
-
     <!-- Board Review Card -->
     <div id="board-card" class="card" style="margin-top: 8px; display: none">
       <div style="display: flex; gap: 12px; align-items: flex-start">
@@ -125,8 +113,7 @@
               align-items: center;
             "
           >
-            <button id="btn-first">|<</button>
-            <button id="btn-prev"><</button>
+            <button id="btn-first">|<</button> <button id="btn-prev"><</button>
             <div
               id="ply-indicator"
               class="muted"
@@ -134,20 +121,17 @@
             >
               -/-
             </div>
-            <button id="btn-next">></button>
-            <button id="btn-last">>|</button>
+            <button id="btn-next">></button> <button id="btn-last">>|</button>
             <div style="flex: 1"></div>
             <label
               class="small muted"
               style="display: flex; align-items: center; gap: 6px"
             >
-              Flip
-              <input id="flip" type="checkbox" />
+              Flip <input id="flip" type="checkbox" />
             </label>
             <button id="btn-exit">Back</button>
           </div>
         </div>
-
         <div style="flex: 1; min-width: 260px">
           <div style="font-weight: 600; margin-bottom: 6px">Position info</div>
           <div id="pos-header" class="small muted">-</div>
@@ -179,7 +163,6 @@
           <div id="eval-line" class="small muted" style="margin-top: 4px">
             Eval: -
           </div>
-
           <div style="font-weight: 600; margin-top: 10px">Moves</div>
           <div
             id="mini-moves"
@@ -199,7 +182,6 @@
         last played move.
       </div>
     </div>
-
     <script type="module" src="popup.js"></script>
   </body>
 </html>
