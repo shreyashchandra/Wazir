@@ -1,4 +1,4 @@
-/* popup.js - fixed: PGN fetch, panelBoard, aria-hidden focus, uci->SAN safe, piece preloading */
+// popup.js - fixed: PGN fetch, panelBoard, aria-hidden focus, uci->SAN safe, piece preloading
 import { Chess } from "./lib/chess.js";
 
 const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
@@ -34,9 +34,49 @@ const movesTable = document.getElementById("moves");
 const boardCard = panelBoard || document.getElementById("panel-board");
 
 const canvas = document.getElementById("board-canvas");
-const ctx = canvas.getContext("2d");
 const coordsLayer = document.getElementById("coords");
+const boardOverlay = document.getElementById("board-overlay");
+const moveBadgeEl = document.getElementById("move-badge");
 
+let ctx = canvas.getContext("2d");
+
+/* Sizes used for drawing (logical) */
+const SIZE = 520; // logical px size — CSS also sets this
+const SQ = SIZE / 8;
+
+/* ensure canvas is scaled to devicePixelRatio for crisp rendering */
+function setupCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  // set CSS size (keeps it visually 520x520)
+  canvas.style.width = SIZE + "px";
+  canvas.style.height = SIZE + "px";
+  // set backing store size for HiDPI
+  canvas.width = Math.round(SIZE * dpr);
+  canvas.height = Math.round(SIZE * dpr);
+  // reset drawing context and scale to logical coordinates
+  ctx = canvas.getContext("2d", { alpha: false });
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // ensure coords layer matches pixel-perfect layout
+  coordsLayer.style.width = SIZE + "px";
+  coordsLayer.style.height = SIZE + "px";
+  boardOverlay.style.width = SIZE + "px";
+  boardOverlay.style.height = SIZE + "px";
+}
+setupCanvas();
+window.addEventListener("resize", () => {
+  setupCanvas();
+  // redraw if board is open
+  if (panelBoard && panelBoard.classList.contains("active")) {
+    drawBoardBase();
+    // If boardStartFen exists, redraw pieces over it
+    if (boardStartFen) {
+      const g = new Chess(boardStartFen);
+      drawPieces(g);
+    }
+  }
+});
+
+/* Buttons + controls */
 const btnFirst = document.getElementById("btn-first");
 const btnPrev = document.getElementById("btn-prev");
 const btnNext = document.getElementById("btn-next");
@@ -51,6 +91,19 @@ const pvLineEl = document.getElementById("pv-line");
 const evalLineEl = document.getElementById("eval-line");
 const miniMovesEl = document.getElementById("mini-moves");
 const pvButtons = Array.from(document.querySelectorAll(".pv-btn"));
+
+const TAG_COLORS = {
+  brilliant: "rgba(0, 255, 255, 0.6)", // cyan glow
+  great: "rgba(66, 135, 245, 0.6)", // blue
+  best: "rgba(69, 163, 255, 0.65)", // light blue
+  excellent: "rgba(0, 255, 100, 0.55)", // bright green
+  good: "rgba(180, 255, 120, 0.45)", // light green
+  book: "rgba(180, 180, 180, 0.45)", // gray
+  miss: "rgba(255, 220, 100, 0.60)", // yellow
+  inaccuracy: "rgba(255, 190, 80, 0.60)", // deep yellow
+  mistake: "rgba(255, 150, 50, 0.60)", // orange
+  blunder: "rgba(255, 0, 0, 0.55)", // red
+};
 
 /* ----------------------------- Engine ----------------------------- */
 let engine;
@@ -656,13 +709,11 @@ function extractSanTokens(pgn) {
 
 /* ============================ BOARD VIEW ============================== */
 
-/* Colors + sizes */
+/* Colors */
 const LIGHT = "#f0d9b5";
 const DARK = "#b58863";
 const H_LAST = "rgba(46, 204, 113, 0.6)";
 const H_BEST = "rgba(52, 152, 219, 0.65)";
-const SIZE = 520; // canvas size (px)
-const SQ = SIZE / 8; // square size (px)
 
 /* ------------------ PNG piece preloading (local pieces) -------------- */
 const pieceKeys = [
@@ -742,6 +793,7 @@ function sqToXY(sq) {
 }
 
 function drawBoardBase() {
+  // ensure canvas matches latest DPR settings (ctx already scaled)
   ctx.clearRect(0, 0, SIZE, SIZE);
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
@@ -754,20 +806,26 @@ function drawBoardBase() {
   // coords
   const files = flipped ? "hgfedcba" : "abcdefgh";
   const ranks = flipped ? "12345678" : "87654321";
-  const coordHtml = [];
+  coordsLayer.innerHTML = "";
   for (let i = 0; i < 8; i++) {
-    coordHtml.push(
-      `<div style="position:absolute; left:${
-        i * SQ + 3
-      }px; bottom:2px; font-weight:600; color:#0008;">${files[i]}</div>`
-    );
-    coordHtml.push(
-      `<div style="position:absolute; right:2px; top:${
-        i * SQ + 2
-      }px; font-weight:600; color:#0008;">${ranks[i]}</div>`
-    );
+    const fileEl = document.createElement("div");
+    fileEl.style.position = "absolute";
+    fileEl.style.left = i * SQ + 3 + "px";
+    fileEl.style.bottom = "2px";
+    fileEl.style.fontWeight = "600";
+    fileEl.style.color = "#0008";
+    fileEl.textContent = files[i];
+    coordsLayer.appendChild(fileEl);
+
+    const rankEl = document.createElement("div");
+    rankEl.style.position = "absolute";
+    rankEl.style.right = "2px";
+    rankEl.style.top = i * SQ + 2 + "px";
+    rankEl.style.fontWeight = "600";
+    rankEl.style.color = "#0008";
+    rankEl.textContent = ranks[i];
+    coordsLayer.appendChild(rankEl);
   }
-  coordsLayer.innerHTML = coordHtml.join("");
 }
 
 /* Draw pieces using preloaded PNG images for Neo look */
@@ -797,13 +855,35 @@ function drawPieces(game) {
   }
 }
 
-function highlightSquares(sqs, color) {
+function highlightSquares(sqs, color, tag) {
   ctx.save();
   ctx.globalCompositeOperation = "multiply";
-  ctx.fillStyle = color === "best" ? H_BEST : H_LAST;
+
+  if (color && color.startsWith && color.startsWith("rgba")) {
+    ctx.fillStyle = color;
+  } else {
+    ctx.fillStyle = color === "best" ? H_BEST : H_LAST;
+  }
+
   for (const sq of sqs) {
     const { x, y } = sqToXY(sq);
     ctx.fillRect(x, y, SQ, SQ);
+
+    // Extra pulse effect for blunders — create DOM element above canvas for pulse
+    if (tag === "blunder") {
+      const el = document.createElement("div");
+      el.className = "blunder-highlight";
+      el.style.position = "absolute";
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+      el.style.width = SQ + "px";
+      el.style.height = SQ + "px";
+      el.style.pointerEvents = "none";
+      // attach to board-overlay so it sits above coords but under move-badge
+      boardOverlay.appendChild(el);
+
+      setTimeout(() => el.remove(), 700);
+    }
   }
   ctx.restore();
 }
@@ -879,6 +959,9 @@ function gotoPly(ply) {
     }
   }
 
+  // clear overlays
+  boardOverlay.innerHTML = "";
+
   drawBoardBase();
   drawPieces(base);
 
@@ -896,7 +979,11 @@ function gotoPly(ply) {
       const last = prev.move(boardPerMove[currentPly - 1].san, {
         sloppy: true,
       });
-      if (last) highlightSquares([last.from, last.to], "last");
+      if (last) {
+        const tag = (boardPerMove[currentPly - 1]?.tag || "").toLowerCase();
+        const color = TAG_COLORS[tag] || H_LAST;
+        highlightSquares([last.from, last.to], color, tag);
+      }
     } catch (e) {
       /* ignore */
     }
@@ -911,12 +998,12 @@ function gotoPly(ply) {
     if (bestUci) {
       const from = bestUci.slice(0, 2);
       const to = bestUci.slice(2, 4);
-      try {
-        highlightSquares([from, to], "best");
-        drawArrow(from, to, "#2E86DE");
-      } catch (e) {
-        /* ignore rendering errors */
-      }
+
+      const moveTag = (node?.tag || "").toLowerCase();
+      const color = TAG_COLORS[moveTag] || "#2E86DE";
+
+      highlightSquares([from, to], color);
+      drawArrow(from, to, color);
     }
   }
 
@@ -953,6 +1040,19 @@ function gotoPly(ply) {
   }
 
   renderMiniMoves(currentPly);
+
+  // update the move badge
+  if (moveBadgeEl) {
+    if (currentPly === 0) {
+      moveBadgeEl.textContent = "";
+      moveBadgeEl.style.background = "rgba(0,0,0,0.6)";
+    } else {
+      const tag = boardPerMove[currentPly - 1].tag || "";
+      moveBadgeEl.textContent = tag ? tag.toUpperCase() : "";
+      // TAG_COLORS values are rgba strings; fallback to semi-opaque black
+      moveBadgeEl.style.background = TAG_COLORS[tag] || "rgba(0,0,0,0.6)";
+    }
+  }
 }
 
 function uciToSAN(fen, uci) {
@@ -1000,14 +1100,22 @@ function buildBoard(summary) {
 
   boardSummary = summary;
   boardPerMove = summary?.perMove || [];
-  boardStartFen = summary?.startFen;
+  boardStartFen = summary?.startFen || undefined;
   flipped = false;
   selectedPV = 1;
 
   // ensure pieces preloaded
-  drawBoardBase();
-  gotoPly(0);
+  awaitPreloadThenDraw();
   boardCard.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+/* small helper to await preload pieces, setup canvas and render initial state */
+function awaitPreloadThenDraw() {
+  return preloadPieces().then(() => {
+    setupCanvas();
+    drawBoardBase();
+    gotoPly(0);
+  });
 }
 
 function renderMiniMoves(selPly) {
@@ -1069,6 +1177,15 @@ pvButtons.forEach((b) =>
     gotoPly(currentPly);
   })
 );
+
+document.querySelectorAll("#quick-filters button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const tag = btn.dataset.tag;
+    // find first matching move and jump to the ply (index + 1)
+    const idx = boardPerMove.findIndex((m) => m.tag === tag);
+    if (idx !== -1) gotoPly(idx + 1);
+  });
+});
 
 boardBtn.addEventListener("click", async () => {
   await preloadPieces();

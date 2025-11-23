@@ -72,8 +72,8 @@
                   Get PGN from page
                 </button>
                 <div class="select-row">
-                  <label class="label-inline"
-                    >Depth
+                  <label class="label-inline">
+                    Depth
                     <select id="depth" class="styled-select">
                       <option value="10">d10</option>
                       <option value="14">d14</option>
@@ -81,8 +81,8 @@
                       <option value="20" selected>d20</option>
                     </select>
                   </label>
-                  <label class="label-inline"
-                    >ms
+                  <label class="label-inline">
+                    ms
                     <input
                       id="ms"
                       type="number"
@@ -91,8 +91,8 @@
                       value="50"
                     />
                   </label>
-                  <label class="label-inline"
-                    >MultiPV
+                  <label class="label-inline">
+                    MultiPV
                     <select id="mpv" class="styled-select">
                       <option value="1">1</option>
                       <option value="2">2</option>
@@ -163,11 +163,17 @@
           <div class="board-wrap card">
             <div class="board-left">
               <div class="board-canvas-wrap">
+                <!-- width/height attributes present; JS will do HiDPI scaling -->
                 <canvas id="board-canvas" width="520" height="520"></canvas>
                 <div id="coords" class="coords"></div>
+
+                <div id="move-badge" class="move-badge"></div>
+                <!-- moved ABOVE overlay -->
+
                 <div id="board-overlay" class="board-overlay"></div>
               </div>
 
+              <!-- BOARD CONTROLS -->
               <div class="board-controls mt8">
                 <button id="btn-first" class="small-btn">|&lt;</button>
                 <button id="btn-prev" class="small-btn">&lt;</button>
@@ -175,16 +181,23 @@
                 <button id="btn-next" class="small-btn">&gt;</button>
                 <button id="btn-last" class="small-btn">&gt;|</button>
                 <div style="flex: 1"></div>
-                <label class="muted small"
-                  >Flip
-                  <input id="flip" type="checkbox" />
+                <label class="muted small">
+                  Flip <input id="flip" type="checkbox" />
                 </label>
                 <button id="btn-exit" class="btn">Back</button>
+              </div>
+
+              <!-- QUICK FILTERS (OPTION A) -->
+              <div id="quick-filters" class="quick-filters mt10">
+                <button data-tag="blunder">Blunders</button>
+                <button data-tag="great">Great</button>
+                <button data-tag="best">Best</button>
               </div>
             </div>
 
             <div class="board-right">
               <div id="pos-header" class="muted small">-</div>
+
               <div class="pos-info">
                 <div id="best-move" class="mono">Best: -</div>
                 <div id="pv-line" class="small muted">PV: -</div>
@@ -198,7 +211,6 @@
       </main>
     </div>
 
-    <!-- engine & analysis module (existing) must load before popup-ui -->
     <script type="module" src="popup.js"></script>
     <script type="module" src="popup-ui.js"></script>
   </body>

@@ -6,13 +6,15 @@
   --panel: linear-gradient(180deg, #121719, #0c1112);
   --muted: #9aa6b0;
   --text: #e7eef2;
-  --accent: #00a854; /* chess.com green */
+  --accent: #00a854;
   --accent-2: #2da65b;
   --glass: rgba(255, 255, 255, 0.03);
   --card-border: rgba(255, 255, 255, 0.03);
+
   --best: #45a3ff;
   --mistake: #ffcc3c;
   --blunder: #ff4d4f;
+
   --size-w: 920px;
 }
 
@@ -97,7 +99,7 @@ body {
   filter: brightness(1.05);
 }
 
-/* Panels & cards */
+/* Panels */
 #content {
   display: block;
 }
@@ -107,6 +109,8 @@ body {
 .panel.active {
   display: block;
 }
+
+/* Cards */
 .card {
   background: var(--panel);
   border-radius: 12px;
@@ -160,6 +164,8 @@ body {
   gap: 6px;
   margin-top: 10px;
 }
+
+/* Badge colors */
 .badges .badge {
   background: transparent;
   border-radius: 10px;
@@ -199,7 +205,7 @@ body {
   border-radius: 6px;
 }
 
-/* Styled selects + inputs */
+/* Styled selects */
 .styled-select {
   background: #0e1617;
   border: 1px solid rgba(255, 255, 255, 0.03);
@@ -286,18 +292,13 @@ canvas {
 .move-row:last-child {
   border-bottom: none;
 }
-.move-row .san {
-  font-weight: 600;
-}
 .tag {
   padding: 4px 8px;
   border-radius: 999px;
   font-size: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.03);
 }
 .tag.best {
   color: var(--best);
-  border-color: rgba(69, 163, 255, 0.2);
 }
 .tag.excellent {
   color: #8ae6a1;
@@ -322,10 +323,9 @@ canvas {
 }
 .tag.blunder {
   color: var(--blunder);
-  border-color: rgba(255, 77, 79, 0.18);
 }
 
-/* row highlights / flashes */
+/* Mini move highlights */
 .flash-mistake {
   animation: flash-yellow 0.8s ease;
 }
@@ -371,17 +371,42 @@ canvas {
   border: 1px solid rgba(255, 255, 255, 0.02);
   background: #fff;
 }
+.board-canvas-wrap canvas {
+  display: block;
+  width: 520px !important;
+  height: 520px !important;
+}
+
+/* coord layer should sit above the canvas but under overlays */
 .coords {
   position: absolute;
   inset: 0;
   pointer-events: none;
   font-size: 12px;
   color: rgba(0, 0, 0, 0.6);
+  z-index: 45;
 }
 .board-overlay {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 50;
+}
+
+/* Move badge on board */
+.move-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  z-index: 60;
 }
 
 /* Mini move list */
@@ -410,7 +435,6 @@ canvas {
   border-color: rgba(69, 163, 255, 0.18);
 }
 
-/* utility */
 .mono {
   font-family: ui-monospace, Menlo, monospace;
 }
@@ -422,11 +446,29 @@ canvas {
   flex-wrap: nowrap;
   overflow: visible;
 }
-
 .board-controls button {
   white-space: nowrap;
 }
 
+/* Quick Filters */
+.quick-filters {
+  display: flex;
+  gap: 10px;
+}
+.quick-filters button {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: #333;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+}
+.quick-filters button:hover {
+  background: #555;
+}
+
+/* Spinner */
 .spinner {
   width: 14px;
   height: 14px;
@@ -438,26 +480,43 @@ canvas {
   vertical-align: middle;
   margin-left: 6px;
 }
-
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
 
-#board-canvas {
-  display: block !important;
-}
-
-/* Smooth show/hide for board panel */
+/* Board show/hide animation */
 #panel-board {
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.22s ease, transform 0.22s ease;
 }
-
 #panel-board.active,
 #panel-board[style*="block"] {
   opacity: 1;
   transform: translateY(0px);
+}
+
+/* Blunder pulse (temporary DOM element placed above board) */
+@keyframes blunderPulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.blunder-highlight {
+  animation: blunderPulse 0.55s ease-out 1;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(255, 77, 79, 0.08);
+  border: 2px solid rgba(255, 77, 79, 0.12);
+  z-index: 55;
 }
