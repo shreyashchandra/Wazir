@@ -1,4 +1,4 @@
-// content.js
+// content.js — improved robustness for fetching PGN & context
 
 async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -15,10 +15,9 @@ async function findGameMeta() {
   m = p.match(/\/analysis\/game\/(live|daily)\/(\d+)/);
   if (m) return { kind: m[1], id: m[2] };
 
-  // Case 3: NEW — /game/ID  (no live/daily in URL)
+  // Case 3: /game/ID  (no live/daily in URL)
   m = p.match(/\/game\/(\d+)/);
   if (m) {
-    // We don't know if it's live or daily, so let API tell us
     return { kind: "auto", id: m[1] };
   }
 
@@ -33,16 +32,20 @@ function looksLikePgn(text) {
   return /\d+\.\s/.test(t);
 }
 
-async function fetchText(url, opts) {
+async function fetchText(url, opts = {}) {
   const res = await fetch(url, opts);
   const text = await res.text();
   return { ok: res.ok, status: res.status, url: res.url, text };
 }
 
 async function fetchPgnDirect(kind, id) {
-  const url = `https://www.chess.com/game/${kind}/${id}.pgn`;
-  const { ok, text } = await fetchText(url, { credentials: "include" });
-  if (ok && looksLikePgn(text)) return text;
+  try {
+    const url = `https://www.chess.com/game/${kind}/${id}.pgn`;
+    const { ok, text } = await fetchText(url, { credentials: "include" });
+    if (ok && looksLikePgn(text)) return text;
+  } catch (e) {
+    // ignore
+  }
   return null;
 }
 

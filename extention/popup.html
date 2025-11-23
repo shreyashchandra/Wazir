@@ -124,7 +124,9 @@
           <div class="progress" style="margin-top: 10px">
             <div id="bar" class="bar"></div>
           </div>
-          <div id="progress" class="small muted mt6">Ready</div>
+          <div id="progress" class="small muted mt6" aria-live="polite">
+            Ready
+          </div>
 
           <div class="pgn-box mt10 card">
             <textarea
@@ -133,7 +135,12 @@
             ></textarea>
             <div class="pgn-actions">
               <button id="board-view" class="btn" disabled>Board view</button>
-              <div id="auto-status" class="muted small">
+              <div
+                id="auto-status"
+                class="muted small"
+                role="status"
+                aria-live="polite"
+              >
                 Paste PGN below if auto-fetch fails.
               </div>
             </div>
@@ -162,24 +169,50 @@
         >
           <div class="board-wrap card">
             <div class="board-left">
-              <div class="board-canvas-wrap">
+              <div class="board-canvas-wrap" id="board-canvas-wrap">
                 <!-- width/height attributes present; JS will do HiDPI scaling -->
                 <canvas id="board-canvas" width="520" height="520"></canvas>
-                <div id="coords" class="coords"></div>
+                <div id="coords" class="coords" aria-hidden="true"></div>
 
-                <div id="move-badge" class="move-badge"></div>
-                <!-- moved ABOVE overlay -->
-
-                <div id="board-overlay" class="board-overlay"></div>
+                <div
+                  id="move-badge"
+                  class="move-badge"
+                  aria-hidden="true"
+                ></div>
+                <div
+                  id="board-overlay"
+                  class="board-overlay"
+                  aria-hidden="true"
+                ></div>
               </div>
 
               <!-- BOARD CONTROLS -->
-              <div class="board-controls mt8">
-                <button id="btn-first" class="small-btn">|&lt;</button>
-                <button id="btn-prev" class="small-btn">&lt;</button>
+              <div
+                class="board-controls mt8"
+                role="group"
+                aria-label="Board controls"
+              >
+                <button
+                  id="btn-first"
+                  class="small-btn"
+                  aria-label="First move"
+                >
+                  |&lt;
+                </button>
+                <button
+                  id="btn-prev"
+                  class="small-btn"
+                  aria-label="Previous move"
+                >
+                  &lt;
+                </button>
                 <div id="ply-indicator" class="muted">-/-</div>
-                <button id="btn-next" class="small-btn">&gt;</button>
-                <button id="btn-last" class="small-btn">&gt;|</button>
+                <button id="btn-next" class="small-btn" aria-label="Next move">
+                  &gt;
+                </button>
+                <button id="btn-last" class="small-btn" aria-label="Last move">
+                  &gt;|
+                </button>
                 <div style="flex: 1"></div>
                 <label class="muted small">
                   Flip <input id="flip" type="checkbox" />
@@ -202,6 +235,12 @@
                 <div id="best-move" class="mono">Best: -</div>
                 <div id="pv-line" class="small muted">PV: -</div>
                 <div id="eval-line" class="small muted">Eval: -</div>
+              </div>
+
+              <div class="pv-controls mt8" aria-label="Engine PV controls">
+                <button class="pv-btn" data-pv="1">PV1</button>
+                <button class="pv-btn" data-pv="2">PV2</button>
+                <button class="pv-btn" data-pv="3">PV3</button>
               </div>
 
               <div class="mini-moves mt10" id="mini-moves"></div>

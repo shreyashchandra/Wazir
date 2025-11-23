@@ -1,6 +1,4 @@
-// popup-ui.js — UI-only: tabs, graphs, animations
-// requires popup.js (module) to load first and expose hooks on window.__wazir
-
+// popup-ui.js — UI-only: tabs, graphs, animations (resilient)
 const QS = (s) => document.querySelector(s);
 const QSA = (s) => Array.from(document.querySelectorAll(s));
 
@@ -30,7 +28,6 @@ tabs.forEach((t) => {
     panels.forEach((p) =>
       p.classList.toggle("active", p.id === `panel-${tab}`)
     );
-    // accessibility
     panels.forEach((p) =>
       p.setAttribute("aria-hidden", !p.classList.contains("active"))
     );
@@ -52,15 +49,12 @@ function drawLine(ctx, canvas, points, opts = {}) {
   const pad = 10;
   ctx.lineWidth = opts.lineWidth || 2;
   ctx.beginPath();
+  const minV = opts.min ?? Math.min(...points);
+  const maxV = opts.max ?? Math.max(...points);
+  const span = maxV - minV || 1;
   for (let i = 0; i < points.length; i++) {
     const x = pad + ((w - pad * 2) * i) / (points.length - 1 || 1);
-    const y =
-      pad +
-      (h - pad * 2) *
-        (1 -
-          (points[i] - (opts.min ?? Math.min(...points))) /
-            ((opts.max ?? Math.max(...points)) -
-              (opts.min ?? Math.min(...points)) || 1));
+    const y = pad + (h - pad * 2) * (1 - (points[i] - minV) / span);
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
@@ -124,7 +118,6 @@ window.addEventListener("wazir:summaryRendered", (ev) => {
       }
     }
 
-    // Draw graphs if data available; clear otherwise
     if (accPoints.length) {
       drawLine(accCtx, accCanvas, accPoints, {
         color: "#62d8a6",
@@ -148,7 +141,6 @@ window.addEventListener("wazir:summaryRendered", (ev) => {
 
     animateMoveTags();
 
-    // progress bar reset
     barEl.style.width = "100%";
     setTimeout(() => (barEl.style.width = "0%"), 700);
   } catch (err) {
@@ -193,7 +185,6 @@ function buildMoveList(perMove) {
     `;
     frag.appendChild(row);
 
-    // small flash on mistakes/blunders
     if (w && (w.tag === "mistake" || w.tag === "blunder")) {
       setTimeout(
         () =>
@@ -237,7 +228,7 @@ function capitalizeTag(t) {
 }
 
 function animateMoveTags() {
-  QSA(".move-row").forEach((r, i) => {
+  QSA(".move-row").forEach((r) => {
     r.addEventListener(
       "mouseenter",
       () => (r.style.filter = "brightness(1.04)")
@@ -249,24 +240,27 @@ function animateMoveTags() {
 /* Click handlers: provide a way to open board from UI */
 if (boardViewBtn) {
   boardViewBtn.addEventListener("click", async () => {
-    const t = tabs.find((x) => x.dataset.tab === "board");
+    const t = [...document.querySelectorAll("#tabs .tab")].find(
+      (x) => x.dataset.tab === "board"
+    );
     if (t) t.click();
 
     if (window.__wazir?.buildBoardFromSummary) {
       const last = window.__wazir.lastSummaryGetter();
       if (last) {
-        window.__wazir.buildBoardFromSummary(last);
+        try {
+          await window.__wazir.buildBoardFromSummary(last);
+        } catch (e) {
+          console.error("Error building board from summary", e);
+        }
       }
     }
   });
 }
 
-/* expose small helper: render a quick status */
+/* small helper: render a quick status */
 function setStatus(s) {
   if (progressEl) progressEl.textContent = s;
 }
 window.addEventListener("load", () => setStatus("Ready"));
-
-window.__wazir_ui = {
-  setStatus,
-};
+window.__wazir_ui = { setStatus };

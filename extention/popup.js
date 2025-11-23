@@ -1,4 +1,4 @@
-// popup.js - fixed: PGN fetch, panelBoard, aria-hidden focus, uci->SAN safe, piece preloading
+// popup.js — refactored for robust async flows & engine lifecycle
 import { Chess } from "./lib/chess.js";
 
 const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
@@ -47,16 +47,12 @@ const SQ = SIZE / 8;
 /* ensure canvas is scaled to devicePixelRatio for crisp rendering */
 function setupCanvas() {
   const dpr = window.devicePixelRatio || 1;
-  // set CSS size (keeps it visually 520x520)
   canvas.style.width = SIZE + "px";
   canvas.style.height = SIZE + "px";
-  // set backing store size for HiDPI
   canvas.width = Math.round(SIZE * dpr);
   canvas.height = Math.round(SIZE * dpr);
-  // reset drawing context and scale to logical coordinates
   ctx = canvas.getContext("2d", { alpha: false });
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  // ensure coords layer matches pixel-perfect layout
   coordsLayer.style.width = SIZE + "px";
   coordsLayer.style.height = SIZE + "px";
   boardOverlay.style.width = SIZE + "px";
@@ -65,10 +61,8 @@ function setupCanvas() {
 setupCanvas();
 window.addEventListener("resize", () => {
   setupCanvas();
-  // redraw if board is open
   if (panelBoard && panelBoard.classList.contains("active")) {
     drawBoardBase();
-    // If boardStartFen exists, redraw pieces over it
     if (boardStartFen) {
       const g = new Chess(boardStartFen);
       drawPieces(g);
@@ -90,38 +84,43 @@ const bestMoveEl = document.getElementById("best-move");
 const pvLineEl = document.getElementById("pv-line");
 const evalLineEl = document.getElementById("eval-line");
 const miniMovesEl = document.getElementById("mini-moves");
-const pvButtons = Array.from(document.querySelectorAll(".pv-btn"));
 
+/* Colors and tags */
 const TAG_COLORS = {
-  brilliant: "rgba(0, 255, 255, 0.6)", // cyan glow
-  great: "rgba(66, 135, 245, 0.6)", // blue
-  best: "rgba(69, 163, 255, 0.65)", // light blue
-  excellent: "rgba(0, 255, 100, 0.55)", // bright green
-  good: "rgba(180, 255, 120, 0.45)", // light green
-  book: "rgba(180, 180, 180, 0.45)", // gray
-  miss: "rgba(255, 220, 100, 0.60)", // yellow
-  inaccuracy: "rgba(255, 190, 80, 0.60)", // deep yellow
-  mistake: "rgba(255, 150, 50, 0.60)", // orange
-  blunder: "rgba(255, 0, 0, 0.55)", // red
+  brilliant: "rgba(0, 255, 255, 0.6)",
+  great: "rgba(66, 135, 245, 0.6)",
+  best: "rgba(69, 163, 255, 0.65)",
+  excellent: "rgba(0, 255, 100, 0.55)",
+  good: "rgba(180, 255, 120, 0.45)",
+  book: "rgba(180, 180, 180, 0.45)",
+  miss: "rgba(255, 220, 100, 0.60)",
+  inaccuracy: "rgba(255, 190, 80, 0.60)",
+  mistake: "rgba(255, 150, 50, 0.60)",
+  blunder: "rgba(255, 0, 0, 0.55)",
 };
 
 /* ----------------------------- Engine ----------------------------- */
-let engine;
+let engine = null;
 let engineReady = false;
 let currentMultiPV = 3;
+const ENGINE_START_TIMEOUT = 7000; // ms
+const ENGINE_QUERY_TIMEOUT = 8000; // ms
 
 function initEngine() {
   if (engine) return;
-  engine = new Worker(
-    chrome.runtime.getURL("stockfish/stockfish-17.1-lite-single-03e3232.js")
-  );
+  engineReady = false;
 
-  engine.onerror = (e) => {
-    console.error("Stockfish worker error:", e.message, e);
-    progressEl.textContent = "Engine error: see console (Inspect popup).";
-  };
+  try {
+    engine = new Worker(
+      chrome.runtime.getURL("stockfish/stockfish-17.1-lite-single-03e3232.js")
+    );
+  } catch (err) {
+    console.error("Failed to create engine worker:", err);
+    setStatus("Engine worker failed to start.");
+    return;
+  }
 
-  engine.onmessage = (e) => {
+  const onmsg = (e) => {
     const line = typeof e.data === "string" ? e.data : e.data?.data;
     if (!line) return;
     if (line.includes("uciok")) {
@@ -131,11 +130,46 @@ function initEngine() {
       post("isready");
     } else if (line.includes("readyok")) {
       engineReady = true;
-      progressEl.textContent = "Engine ready.";
+      setStatus("Engine ready.");
     }
   };
 
-  post("uci");
+  engine.addEventListener("message", onmsg);
+  engine.onerror = (ev) => {
+    console.error("Stockfish worker error:", ev?.message || ev);
+    setStatus("Engine error. See console (Inspect popup).");
+  };
+
+  post = (cmd) => {
+    try {
+      if (engine) engine.postMessage(cmd);
+    } catch (err) {
+      console.error("Failed to post to engine:", err);
+    }
+  };
+
+  // send uci to start handshake
+  try {
+    engine.postMessage("uci");
+  } catch (e) {
+    console.error("Engine start post failed", e);
+  }
+}
+
+function shutdownEngine() {
+  try {
+    if (engine) {
+      try {
+        engine.terminate();
+      } catch (killErr) {
+        console.warn("Engine termination error:", killErr);
+      }
+      engine = null;
+      engineReady = false;
+    }
+  } catch (err) {
+    console.error("Error shutting down engine:", err);
+  }
 }
 
 function post(cmd) {
@@ -144,20 +178,23 @@ function post(cmd) {
 }
 
 function parseInfoMulti(line) {
-  const m = line.match(
-    /\bmultipv\s+(\d+).*?\bscore\s+(cp|mate)\s+(-?\d+).*?\bpv\s+(.+)$/
-  );
-  if (!m) return null;
-  const multipv = parseInt(m[1], 10);
-  const type = m[2];
-  const value = parseInt(m[3], 10);
-  const pv = m[4].trim().split(/\s+/);
-  const move = pv[0];
+  // token-based parser: more robust than one big regex
+  // Expected minimal structure: "info ... multipv N ... score (cp|mate) V ... pv uci uci ..."
+  const multipvMatch = line.match(/\bmultipv\s+(\d+)/);
+  const scoreMatch = line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
+  const pvMatch = line.match(/\bpv\s+(.+)$/);
+  if (!multipvMatch || !scoreMatch) return null;
+  const multipv = parseInt(multipvMatch[1], 10);
+  const type = scoreMatch[1];
+  const value = parseInt(scoreMatch[2], 10);
+  const pv = pvMatch ? pvMatch[1].trim().split(/\s+/) : [];
+  const move = pv.length ? pv[0] : null;
   return { multipv, type, value, pv, move };
 }
 
-function onceBestWithMulti(multipv) {
+function onceBestWithMulti(multipv, timeout = ENGINE_QUERY_TIMEOUT) {
   return new Promise((resolve) => {
+    if (!engine) return resolve([]);
     const lines = {};
     const handler = (e) => {
       const line = typeof e.data === "string" ? e.data : e.data?.data;
@@ -167,15 +204,25 @@ function onceBestWithMulti(multipv) {
         if (info && info.multipv <= multipv) lines[info.multipv] = info;
       } else if (line.startsWith("bestmove ")) {
         engine.removeEventListener("message", handler);
+        clearTimeout(tid);
         const arr = Object.values(lines).sort((a, b) => a.multipv - b.multipv);
         resolve(arr);
       }
     };
     engine.addEventListener("message", handler);
+    const tid = setTimeout(() => {
+      try {
+        engine.removeEventListener("message", handler);
+      } catch {}
+      const arr = Object.values(lines).sort((a, b) => a.multipv - b.multipv);
+      resolve(arr);
+    }, timeout);
   });
 }
 
 async function analyzeFenMulti(fen, opts, multipv) {
+  if (!engine) initEngine();
+  if (!engine) return [];
   post(`position fen ${fen}`);
   if (multipv !== currentMultiPV) {
     post(`setoption name MultiPV value ${multipv}`);
@@ -188,6 +235,8 @@ async function analyzeFenMulti(fen, opts, multipv) {
 }
 
 async function analyzeFenForMove(fen, moveObj, opts) {
+  if (!engine) initEngine();
+  if (!engine) return null;
   const uci =
     moveObj.from + moveObj.to + (moveObj.promotion ? moveObj.promotion : "");
   post(`position fen ${fen}`);
@@ -265,7 +314,7 @@ function categorizeMove({ ply, preCp, playedCp, preTop, cpLoss }) {
   return { tag: "blunder" };
 }
 
-/* ---------------- Messaging helpers: ensure content.js listening --------- */
+/* ----------------------------- Messaging helpers ------------------------ */
 async function getActiveTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) throw new Error("No active tab");
@@ -342,7 +391,6 @@ async function loadPgnViaLocalApi() {
         );
       }
       if (g && g.PGN) {
-        // return PGN string only (UI expects a string)
         return g.PGN;
       }
     } catch {
@@ -354,10 +402,9 @@ async function loadPgnViaLocalApi() {
 
 /* ------------------------ Get PGN button handler ------------------------ */
 btnAuto.addEventListener("click", async () => {
-  autoStatus.innerHTML = `Getting PGN <span class="spinner"></span>`;
+  autoStatus.innerHTML = `Getting PGN <span class="spinner" aria-hidden="true"></span>`;
   try {
-    const pgn = await loadPgnViaLocalApi(); // returns string
-    // always coerce to string
+    const pgn = await loadPgnViaLocalApi();
     pgnEl.value = String(pgn || "").trim();
     autoStatus.textContent = "PGN loaded!";
   } catch (e) {
@@ -383,14 +430,18 @@ analyzeBtn.addEventListener("click", async () => {
     movesTable.innerHTML = "";
     boardBtn.disabled = true;
 
-    progressEl.textContent = "Preparing engine...";
+    setStatus("Preparing engine...");
     barEl.style.width = "0%";
-    await waitReady();
 
-    // defensively coerce PGN to string (fixes: pgn.trim is not a function)
+    const ready = await waitReady(ENGINE_START_TIMEOUT);
+    if (!ready) {
+      setStatus("Engine failed to start.");
+      return;
+    }
+
     const pgn = String(pgnEl.value || "").trim();
     if (!pgn) {
-      progressEl.textContent = "Please paste a PGN or fetch it.";
+      setStatus("Please paste a PGN or fetch it.");
       return;
     }
 
@@ -409,16 +460,22 @@ analyzeBtn.addEventListener("click", async () => {
     renderSummary(summary);
   } catch (e) {
     console.error(e);
-    progressEl.textContent = "Error: " + (e?.message || e);
+    setStatus("Error: " + (e?.message || e));
   }
 });
 
-function waitReady() {
+function waitReady(timeout = 7000) {
   return new Promise((res) => {
+    const start = Date.now();
     const t = setInterval(() => {
       if (engineReady) {
         clearInterval(t);
-        res();
+        res(true);
+        return;
+      }
+      if (Date.now() - start > timeout) {
+        clearInterval(t);
+        res(false);
       }
     }, 50);
   });
@@ -460,7 +517,10 @@ async function runAnalysis(pgn, opts) {
 
     const preview = new Chess(fenBefore);
     const moveObj = preview.move(san, { sloppy: true });
-    if (!moveObj) break;
+    if (!moveObj) {
+      console.warn("Invalid SAN at ply", i + 1, "token:", san);
+      break;
+    }
 
     const playedInfo = await analyzeFenForMove(fenBefore, moveObj, opts);
     const playedCp = playedInfo ? infoToCp(playedInfo) : preCp;
@@ -479,7 +539,6 @@ async function runAnalysis(pgn, opts) {
       cpLoss,
     });
 
-    // Collect MultiPV lines for this node (1..m)
     const pvMap = {};
     for (const line of preArr) {
       pvMap[line.multipv] = line;
@@ -501,7 +560,7 @@ async function runAnalysis(pgn, opts) {
 
     const pct = Math.round(((i + 1) / total) * 100);
     barEl.style.width = pct + "%";
-    progressEl.textContent = `Analyzing... ${i + 1}/${total} moves`;
+    setStatus(`Analyzing... ${i + 1}/${total} moves`);
   }
 
   const by = (color) => {
@@ -569,7 +628,6 @@ function renderSummary(s) {
     "- Mate evals are clamped to stabilize accuracy.\n" +
     "- Categories are heuristic but calibrated to feel similar to Chess.com.";
 
-  // allow UI module to react (graphs, animations)
   window.dispatchEvent(new CustomEvent("wazir:summaryRendered", { detail: s }));
 }
 
@@ -731,9 +789,9 @@ const pieceKeys = [
   "bP",
 ];
 
-const IMAGES = {}; // key -> HTMLImageElement
+const IMAGES = {};
 
-function preloadPieces() {
+function preloadPieces(timeout = 4000) {
   const promises = [];
   for (const k of pieceKeys) {
     const img = new Image();
@@ -744,34 +802,16 @@ function preloadPieces() {
     promises.push(
       new Promise((res) => {
         if (img.complete && img.naturalWidth > 0) {
-          console.log(`[pieces] already loaded: ${k} -> ${src}`);
           return res();
         }
-
-        img.onload = () => {
-          console.log(`[pieces] loaded: ${k} -> ${src}`, {
-            width: img.naturalWidth,
-            height: img.naturalHeight,
-          });
-          res();
-        };
-
-        img.onerror = (ev) => {
-          console.error(`[pieces] FAILED to load: ${k} -> ${src}`, ev);
-          res();
-        };
-
-        setTimeout(() => {
-          if (!img.complete) {
-            console.warn(`[pieces] timeout while loading: ${k} -> ${src}`);
-            res();
-          }
-        }, 2500);
+        img.onload = () => res();
+        img.onerror = () => res();
+        setTimeout(() => res(), timeout);
       })
     );
   }
   return Promise.all(promises).then(() => {
-    console.log("[pieces] preload finished; IMAGES keys:", Object.keys(IMAGES));
+    // no-op; IMAGES references ready where available
   });
 }
 
@@ -793,7 +833,6 @@ function sqToXY(sq) {
 }
 
 function drawBoardBase() {
-  // ensure canvas matches latest DPR settings (ctx already scaled)
   ctx.clearRect(0, 0, SIZE, SIZE);
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
@@ -803,7 +842,6 @@ function drawBoardBase() {
       ctx.fillRect(x, y, SQ, SQ);
     }
   }
-  // coords
   const files = flipped ? "hgfedcba" : "abcdefgh";
   const ranks = flipped ? "12345678" : "87654321";
   coordsLayer.innerHTML = "";
@@ -859,17 +897,18 @@ function highlightSquares(sqs, color, tag) {
   ctx.save();
   ctx.globalCompositeOperation = "multiply";
 
-  if (color && color.startsWith && color.startsWith("rgba")) {
-    ctx.fillStyle = color;
-  } else {
-    ctx.fillStyle = color === "best" ? H_BEST : H_LAST;
-  }
+  const fill =
+    color && color.startsWith && color.startsWith("rgba")
+      ? color
+      : color === "best"
+      ? H_BEST
+      : H_LAST;
+  ctx.fillStyle = fill;
 
   for (const sq of sqs) {
     const { x, y } = sqToXY(sq);
     ctx.fillRect(x, y, SQ, SQ);
 
-    // Extra pulse effect for blunders — create DOM element above canvas for pulse
     if (tag === "blunder") {
       const el = document.createElement("div");
       el.className = "blunder-highlight";
@@ -879,9 +918,7 @@ function highlightSquares(sqs, color, tag) {
       el.style.width = SQ + "px";
       el.style.height = SQ + "px";
       el.style.pointerEvents = "none";
-      // attach to board-overlay so it sits above coords but under move-badge
       boardOverlay.appendChild(el);
-
       setTimeout(() => el.remove(), 700);
     }
   }
@@ -959,21 +996,17 @@ function gotoPly(ply) {
     }
   }
 
-  // clear overlays
   boardOverlay.innerHTML = "";
 
   drawBoardBase();
   drawPieces(base);
 
-  // Last move highlight
   if (currentPly > 0) {
     const prev = new Chess(boardStartFen);
     for (let i = 0; i < currentPly - 1; i++) {
       try {
         prev.move(boardPerMove[i].san, { sloppy: true });
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
     }
     try {
       const last = prev.move(boardPerMove[currentPly - 1].san, {
@@ -984,12 +1017,9 @@ function gotoPly(ply) {
         const color = TAG_COLORS[tag] || H_LAST;
         highlightSquares([last.from, last.to], color, tag);
       }
-    } catch (e) {
-      /* ignore */
-    }
+    } catch (e) {}
   }
 
-  // Best move arrow: show engine suggestion AFTER the last played move
   let node = null;
   if (currentPly > 0) node = boardPerMove[currentPly - 1];
 
@@ -998,24 +1028,19 @@ function gotoPly(ply) {
     if (bestUci) {
       const from = bestUci.slice(0, 2);
       const to = bestUci.slice(2, 4);
-
       const moveTag = (node?.tag || "").toLowerCase();
       const color = TAG_COLORS[moveTag] || "#2E86DE";
-
       highlightSquares([from, to], color);
       drawArrow(from, to, color);
     }
   }
 
-  // UI text
   plyIndicator.textContent = `${currentPly}/${boardPerMove.length}`;
   const turn = base.turn() === "w" ? "White to move" : "Black to move";
   posHeader.textContent = `${turn} | FEN: ${base.fen()}`;
 
-  // Best move + PV text (based on node above)
   if (node && node.pvLines && node.pvLines[selectedPV]) {
     const info = node.pvLines[selectedPV];
-    // safe uci->san (avoid throwing)
     let bestSAN = null;
     try {
       bestSAN = uciToSAN(base.fen(), info.move);
@@ -1041,7 +1066,6 @@ function gotoPly(ply) {
 
   renderMiniMoves(currentPly);
 
-  // update the move badge
   if (moveBadgeEl) {
     if (currentPly === 0) {
       moveBadgeEl.textContent = "";
@@ -1049,7 +1073,6 @@ function gotoPly(ply) {
     } else {
       const tag = boardPerMove[currentPly - 1].tag || "";
       moveBadgeEl.textContent = tag ? tag.toUpperCase() : "";
-      // TAG_COLORS values are rgba strings; fallback to semi-opaque black
       moveBadgeEl.style.background = TAG_COLORS[tag] || "rgba(0,0,0,0.6)";
     }
   }
@@ -1061,12 +1084,10 @@ function uciToSAN(fen, uci) {
   const from = uci.slice(0, 2);
   const to = uci.slice(2, 4);
   const promotion = uci.slice(4) || undefined;
-  // Try safely, and if illegal return null instead of throwing
   try {
     const m = g.move({ from, to, promotion });
     return m ? m.san : null;
   } catch (e) {
-    // As fallback try string-based move (shouldn't normally be needed)
     try {
       const m2 = g.move(from + to + (promotion || ""));
       return m2 ? m2.san : null;
@@ -1076,46 +1097,50 @@ function uciToSAN(fen, uci) {
   }
 }
 
-function buildBoard(summary) {
+/* ------------------ buildBoard (async safe) ---------------- */
+async function buildBoard(summary) {
   if (!panelBoard) {
     console.error("panel-board missing");
     return;
   }
 
-  // show the panel after blurring active element to avoid aria-hidden warnings
   try {
     if (document.activeElement && document.activeElement.blur)
       document.activeElement.blur();
   } catch (e) {}
 
-  // hide other panels
+  // hide other panels but do not reveal board until ready
   document.querySelectorAll(".panel").forEach((p) => {
     p.classList.remove("active");
     p.setAttribute("aria-hidden", "true");
   });
 
-  panelBoard.classList.add("active");
-  panelBoard.setAttribute("aria-hidden", "false");
-  panelBoard.style.display = "block";
-
+  // set internal state before rendering
   boardSummary = summary;
   boardPerMove = summary?.perMove || [];
   boardStartFen = summary?.startFen || undefined;
   flipped = false;
   selectedPV = 1;
 
-  // ensure pieces preloaded
-  awaitPreloadThenDraw();
+  // preload pieces and prepare canvas BEFORE revealing panel
+  await preloadPieces();
+  setupCanvas();
+  drawBoardBase();
+  gotoPly(0);
+
+  // now safe to reveal board panel
+  panelBoard.classList.add("active");
+  panelBoard.setAttribute("aria-hidden", "false");
+  panelBoard.style.display = "block";
   boardCard.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 /* small helper to await preload pieces, setup canvas and render initial state */
-function awaitPreloadThenDraw() {
-  return preloadPieces().then(() => {
-    setupCanvas();
-    drawBoardBase();
-    gotoPly(0);
-  });
+async function awaitPreloadThenDraw() {
+  await preloadPieces();
+  setupCanvas();
+  drawBoardBase();
+  gotoPly(0);
 }
 
 function renderMiniMoves(selPly) {
@@ -1171,17 +1196,10 @@ flipEl.addEventListener("change", () => {
   drawBoardBase();
   gotoPly(currentPly);
 });
-pvButtons.forEach((b) =>
-  b.addEventListener("click", () => {
-    selectedPV = parseInt(b.dataset.pv, 10) || 1;
-    gotoPly(currentPly);
-  })
-);
 
 document.querySelectorAll("#quick-filters button").forEach((btn) => {
   btn.addEventListener("click", () => {
     const tag = btn.dataset.tag;
-    // find first matching move and jump to the ply (index + 1)
     const idx = boardPerMove.findIndex((m) => m.tag === tag);
     if (idx !== -1) gotoPly(idx + 1);
   });
@@ -1189,45 +1207,36 @@ document.querySelectorAll("#quick-filters button").forEach((btn) => {
 
 boardBtn.addEventListener("click", async () => {
   await preloadPieces();
-
-  // blur active element to avoid hiding focused element with aria-hidden
   try {
     if (document.activeElement && document.activeElement.blur)
       document.activeElement.blur();
   } catch (e) {}
-
-  // hide other panels (and mark aria-hidden)
-  document
-    .querySelectorAll(".panel")
-    .forEach((p) => p.setAttribute("aria-hidden", "true"));
-
-  const boardEl = document.getElementById("panel-board");
-  if (!boardEl) {
-    console.error("ERROR: panel-board not found in popup.html");
-    return;
-  }
-  boardEl.setAttribute("aria-hidden", "false");
-  boardEl.style.display = "block";
-
-  // wait for layout
-  await new Promise((res) => requestAnimationFrame(res));
-  await new Promise((res) => requestAnimationFrame(res));
 
   if (!lastSummary || !lastSummary.perMove) {
     console.error("Summary missing when building board!", lastSummary);
     return;
   }
 
-  buildBoard(lastSummary);
-
-  await new Promise((res) => requestAnimationFrame(res));
+  await buildBoard(lastSummary);
   gotoPly(currentPly);
 });
 
-// Expose small hooks for UI module
+/* Expose small hooks for UI module */
 window.__wazir = {
   parseHeadersFromPgn,
   extractSanTokens,
   lastSummaryGetter: () => lastSummary,
-  buildBoardFromSummary: (summary) => buildBoard(summary),
+  buildBoardFromSummary: async (summary) => await buildBoard(summary),
 };
+
+/* shutdown engine when popup unloads to free resources */
+window.addEventListener("unload", () => {
+  shutdownEngine();
+});
+
+/* helper for UI status */
+function setStatus(s) {
+  if (progressEl) progressEl.textContent = s;
+}
+window.__wazir_ui = { setStatus };
+window.addEventListener("load", () => setStatus("Ready"));
