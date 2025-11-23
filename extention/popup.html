@@ -2,186 +2,204 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Chess.com Game Review</title>
+    <title>Wazir — Game Review</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <h3>WAZIR</h3>
-    <div class="card" style="margin-bottom: 8px">
-      <div class="controls">
-        <button id="btn-auto">Get PGN from current page</button>
-        <div class="right">
-          <label>
-            Depth
-            <select id="depth">
-              <option value="10">d10</option>
-              <option value="14">d14</option>
-              <option value="18">d18</option>
-              <option value="20" selected>d20</option>
-            </select>
-          </label>
-          <label>
-            ms <input id="ms" type="number" value="500" min="40" max="10000" />
-          </label>
-          <label>
-            MultiPV
-            <select id="mpv">
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="3" selected>3</option>
-            </select>
-          </label>
-          <button id="analyze">Analyze</button>
-          <button id="board-view" title="Open board review" disabled>
-            Board view
-          </button>
-        </div>
-      </div>
-      <div id="auto-status" class="small muted" style="margin: 6px 0 8px 0">
-        Paste PGN below if auto-fetch fails.
-      </div>
-      <textarea id="pgn" placeholder="Paste PGN here..."></textarea>
-      <div class="progress" style="margin-top: 8px"><div id="bar"></div></div>
-      <div id="progress" class="small muted" style="margin-top: 4px"></div>
-    </div>
-    <div class="row">
-      <div class="card">
-        <div class="kpis">
-          <div class="kpi">
-            <h4>White Accuracy</h4>
-            <div id="w-acc" class="big">-</div>
-          </div>
-          <div class="kpi">
-            <h4>Black Accuracy</h4>
-            <div id="b-acc" class="big">-</div>
-          </div>
-          <div class="kpi">
-            <h4>White ACPL</h4>
-            <div id="w-acpl" class="big">-</div>
-          </div>
-          <div class="kpi">
-            <h4>Black ACPL</h4>
-            <div id="b-acpl" class="big">-</div>
+    <div id="wazir-root">
+      <header id="header">
+        <div class="hdr-left">
+          <img src="icons/pawn-32.png" alt="W" class="logo" />
+          <div class="title">
+            <div class="app">WAZIR</div>
+            <div class="sub">Game Review</div>
           </div>
         </div>
-        <div style="margin-top: 8px">
-          <div class="badges" id="w-badges"></div>
-          <div class="badges" id="b-badges" style="margin-top: 6px"></div>
+
+        <div class="hdr-right">
+          <div id="opening-name" class="muted">— Opening: Unknown</div>
         </div>
-      </div>
-      <div class="card">
-        <div id="title" style="font-weight: 600; margin-bottom: 8px">-</div>
-        <pre id="notes" class="small muted" style="white-space: pre-wrap"></pre>
-      </div>
-    </div>
-    <div class="card" style="margin-top: 8px">
-      <div style="font-weight: 600; margin-bottom: 6px">Move-by-move</div>
-      <div class="table" id="moves"></div>
-    </div>
-    <!-- Board Review Card -->
-    <div id="board-card" class="card" style="margin-top: 8px; display: none">
-      <div style="display: flex; gap: 12px; align-items: flex-start">
-        <div>
-          <div style="position: relative; width: 520px; height: 520px">
-            <canvas
-              id="board-canvas"
-              width="520"
-              height="520"
-              style="
-                display: block;
-                border: 1px solid #444;
-                border-radius: 6px;
-                background: #fff;
-              "
-            ></canvas>
-            <div
-              id="coords"
-              style="
-                position: absolute;
-                inset: 0;
-                pointer-events: none;
-                font: 11px system-ui, sans-serif;
-                color: #222;
-              "
-            ></div>
-          </div>
-          <div
-            style="
-              margin-top: 8px;
-              display: flex;
-              gap: 6px;
-              align-items: center;
-            "
-          >
-            <button id="btn-first">|<</button> <button id="btn-prev"><</button>
-            <div
-              id="ply-indicator"
-              class="muted"
-              style="min-width: 90px; text-align: center"
-            >
-              -/-
+      </header>
+
+      <nav id="tabs" role="tablist">
+        <button
+          class="tab active"
+          data-tab="summary"
+          role="tab"
+          aria-selected="true"
+        >
+          Summary
+        </button>
+        <button class="tab" data-tab="moves" role="tab">Move List</button>
+        <button class="tab" data-tab="board" role="tab">Board</button>
+      </nav>
+
+      <main id="content">
+        <!-- SUMMARY PANEL -->
+        <section id="panel-summary" class="panel active" role="tabpanel">
+          <div class="summary-grid">
+            <div class="metrics card">
+              <div class="metrics-row">
+                <div class="metric">
+                  <div class="label">White Accuracy</div>
+                  <div id="w-acc" class="big">-</div>
+                </div>
+                <div class="metric">
+                  <div class="label">Black Accuracy</div>
+                  <div id="b-acc" class="big">-</div>
+                </div>
+              </div>
+
+              <div class="metrics-row mt8">
+                <div class="metric small">
+                  <div class="label">White ACPL</div>
+                  <div id="w-acpl">-</div>
+                </div>
+                <div class="metric small">
+                  <div class="label">Black ACPL</div>
+                  <div id="b-acpl">-</div>
+                </div>
+              </div>
+
+              <div class="badges-row mt10">
+                <div id="w-badges" class="badges"></div>
+                <div id="b-badges" class="badges" style="margin-top: 6px"></div>
+              </div>
+
+              <div class="controls mt12">
+                <button id="btn-auto" class="btn primary">
+                  Get PGN from page
+                </button>
+                <div class="select-row">
+                  <label class="label-inline"
+                    >Depth
+                    <select id="depth" class="styled-select">
+                      <option value="10">d10</option>
+                      <option value="14">d14</option>
+                      <option value="18">d18</option>
+                      <option value="20" selected>d20</option>
+                    </select>
+                  </label>
+                  <label class="label-inline"
+                    >ms
+                    <input
+                      id="ms"
+                      type="number"
+                      min="40"
+                      max="10000"
+                      value="50"
+                    />
+                  </label>
+                  <label class="label-inline"
+                    >MultiPV
+                    <select id="mpv" class="styled-select">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                    </select>
+                  </label>
+                  <button id="analyze" class="btn accent">Analyze</button>
+                </div>
+              </div>
+
+              <div class="notes mt10 card small muted" id="notes">Notes: -</div>
             </div>
-            <button id="btn-next">></button> <button id="btn-last">>|</button>
-            <div style="flex: 1"></div>
-            <label
-              class="small muted"
-              style="display: flex; align-items: center; gap: 6px"
-            >
-              Flip <input id="flip" type="checkbox" />
-            </label>
-            <button id="btn-exit">Back</button>
-          </div>
-        </div>
-        <div style="flex: 1; min-width: 260px">
-          <div style="font-weight: 600; margin-bottom: 6px">Position info</div>
-          <div id="pos-header" class="small muted">-</div>
-          <div
-            style="
-              display: flex;
-              gap: 8px;
-              align-items: center;
-              margin-top: 8px;
-            "
-          >
-            <div class="small muted">MultiPV</div>
-            <div>
-              <button class="pv-btn" data-pv="1">#1</button>
-              <button class="pv-btn" data-pv="2">#2</button>
-              <button class="pv-btn" data-pv="3">#3</button>
+
+            <div class="charts card">
+              <div class="chart-header">
+                <div class="label">Accuracy Graph</div>
+                <div class="muted small">per ply</div>
+              </div>
+              <canvas id="acc-graph" width="700" height="160"></canvas>
+
+              <div class="chart-header mt8">
+                <div class="label">Advantage Graph</div>
+                <div class="muted small">engine eval (centipawns)</div>
+              </div>
+              <canvas id="adv-graph" width="700" height="120"></canvas>
             </div>
           </div>
-          <div id="best-move" style="margin-top: 8px; font-family: monospace">
-            Best: -
+
+          <div class="progress" style="margin-top: 10px">
+            <div id="bar" class="bar"></div>
           </div>
-          <div
-            id="pv-line"
-            class="small"
-            style="margin-top: 4px; white-space: pre-wrap"
-          >
-            PV: -
+          <div id="progress" class="small muted mt6">Ready</div>
+
+          <div class="pgn-box mt10 card">
+            <textarea
+              id="pgn"
+              placeholder="Paste PGN here or fetch from page..."
+            ></textarea>
+            <div class="pgn-actions">
+              <button id="board-view" class="btn" disabled>Board view</button>
+              <div id="auto-status" class="muted small">
+                Paste PGN below if auto-fetch fails.
+              </div>
+            </div>
           </div>
-          <div id="eval-line" class="small muted" style="margin-top: 4px">
-            Eval: -
+        </section>
+
+        <!-- MOVES PANEL -->
+        <section
+          id="panel-moves"
+          class="panel"
+          role="tabpanel"
+          aria-hidden="true"
+        >
+          <div class="moves-container card">
+            <div id="title" class="title muted">-</div>
+            <div id="moves" class="move-list"></div>
           </div>
-          <div style="font-weight: 600; margin-top: 10px">Moves</div>
-          <div
-            id="mini-moves"
-            style="
-              max-height: 220px;
-              overflow: auto;
-              padding: 6px;
-              border: 1px solid #333;
-              border-radius: 4px;
-              font: 12px/1.4 system-ui, sans-serif;
-            "
-          ></div>
-        </div>
-      </div>
-      <div class="small muted" style="margin-top: 8px">
-        Tips: Blue arrow shows the best move suggestion. Green squares mark the
-        last played move.
-      </div>
+        </section>
+
+        <!-- BOARD PANEL -->
+        <section
+          id="panel-board"
+          class="panel"
+          role="tabpanel"
+          aria-hidden="true"
+        >
+          <div class="board-wrap card">
+            <div class="board-left">
+              <div class="board-canvas-wrap">
+                <canvas id="board-canvas" width="520" height="520"></canvas>
+                <div id="coords" class="coords"></div>
+                <div id="board-overlay" class="board-overlay"></div>
+              </div>
+
+              <div class="board-controls mt8">
+                <button id="btn-first" class="small-btn">|&lt;</button>
+                <button id="btn-prev" class="small-btn">&lt;</button>
+                <div id="ply-indicator" class="muted">-/-</div>
+                <button id="btn-next" class="small-btn">&gt;</button>
+                <button id="btn-last" class="small-btn">&gt;|</button>
+                <div style="flex: 1"></div>
+                <label class="muted small"
+                  >Flip
+                  <input id="flip" type="checkbox" />
+                </label>
+                <button id="btn-exit" class="btn">Back</button>
+              </div>
+            </div>
+
+            <div class="board-right">
+              <div id="pos-header" class="muted small">-</div>
+              <div class="pos-info">
+                <div id="best-move" class="mono">Best: -</div>
+                <div id="pv-line" class="small muted">PV: -</div>
+                <div id="eval-line" class="small muted">Eval: -</div>
+              </div>
+
+              <div class="mini-moves mt10" id="mini-moves"></div>
+            </div>
+          </div>
+        </section>
+      </main>
     </div>
+
+    <!-- engine & analysis module (existing) must load before popup-ui -->
     <script type="module" src="popup.js"></script>
+    <script type="module" src="popup-ui.js"></script>
   </body>
 </html>

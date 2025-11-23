@@ -1,5 +1,4 @@
-/* popup.js - full updated file (PNG Neo pieces, high-quality smoothing, best-move-after fix) */
-
+/* popup.js - fixed: PGN fetch, panelBoard, aria-hidden focus, uci->SAN safe, piece preloading */
 import { Chess } from "./lib/chess.js";
 
 const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
@@ -7,7 +6,9 @@ const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
 /* ---------- Force sane popup width ---------- */
 document.documentElement.style.minWidth = "920px";
 document.body.style.minWidth = "920px";
+
 /* ----------------------------- DOM refs ----------------------------- */
+const panelBoard = document.getElementById("panel-board");
 const btnAuto = document.getElementById("btn-auto");
 const autoStatus = document.getElementById("auto-status");
 const pgnEl = document.getElementById("pgn");
@@ -30,7 +31,8 @@ const bBadges = document.getElementById("b-badges");
 const movesTable = document.getElementById("moves");
 
 /* ---------------- Board view elements ---------------- */
-const boardCard = document.getElementById("board-card");
+const boardCard = panelBoard || document.getElementById("panel-board");
+
 const canvas = document.getElementById("board-canvas");
 const ctx = canvas.getContext("2d");
 const coordsLayer = document.getElementById("coords");
@@ -84,6 +86,7 @@ function initEngine() {
 }
 
 function post(cmd) {
+  if (!engine) return;
   engine.postMessage(cmd);
 }
 
@@ -128,7 +131,7 @@ async function analyzeFenMulti(fen, opts, multipv) {
   if (opts.movetime) post(`go movetime ${opts.movetime}`);
   else post(`go depth ${opts.depth}`);
   const arr = await onceBestWithMulti(multipv);
-  return arr;
+  return arr || [];
 }
 
 async function analyzeFenForMove(fen, moveObj, opts) {
@@ -216,13 +219,6 @@ async function getActiveTabId() {
   return tab.id;
 }
 
-// async function logTabId() {
-//   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-//   if (!tab || !tab.id) throw new Error("No active tab");
-//   console.log(tab);
-//   return tab;
-// }
-
 async function sendMessageToTab(tabId, msg) {
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, msg, (res) => {
@@ -257,7 +253,7 @@ async function getGameContextFromPage() {
   }
 }
 
-/* -------- Local API helpers (returns your exact-formatted PGN) ---------- */
+/* -------- Local API helpers (returns PGN string) ---------- */
 async function fetchGamesFromLocalApi(username, year, month) {
   const url = `${API_ORIGIN}/pgn?username=${encodeURIComponent(
     username
@@ -292,9 +288,12 @@ async function loadPgnViaLocalApi() {
           (x) => /\[Link\s+"[^"]*\/(\d+)/.test(x.PGN) && x.PGN.includes(meta.id)
         );
       }
-      if (g && g.PGN) return g.PGN;
+      if (g && g.PGN) {
+        // return PGN string only (UI expects a string)
+        return g.PGN;
+      }
     } catch {
-      // try next
+      // try next username
     }
   }
   throw new Error("Game not found in monthly archives via local API");
@@ -302,18 +301,15 @@ async function loadPgnViaLocalApi() {
 
 /* ------------------------ Get PGN button handler ------------------------ */
 btnAuto.addEventListener("click", async () => {
-  autoStatus.textContent = "Getting PGN (local API)...";
+  autoStatus.innerHTML = `Getting PGN <span class="spinner"></span>`;
   try {
-    const pgn = await loadPgnViaLocalApi();
-    pgnEl.value = pgn.trim();
-    autoStatus.textContent = "PGN loaded from local API.";
+    const pgn = await loadPgnViaLocalApi(); // returns string
+    // always coerce to string
+    pgnEl.value = String(pgn || "").trim();
+    autoStatus.textContent = "PGN loaded!";
   } catch (e) {
     console.error(e);
-    autoStatus.textContent =
-      "Couldn't get PGN via local API. Ensure the game is open and server running at " +
-      API_ORIGIN +
-      ". Error: " +
-      (e?.message || e);
+    autoStatus.textContent = "Couldn't get PGN. Try again.";
   }
 });
 
@@ -338,7 +334,8 @@ analyzeBtn.addEventListener("click", async () => {
     barEl.style.width = "0%";
     await waitReady();
 
-    const pgn = pgnEl.value.trim();
+    // defensively coerce PGN to string (fixes: pgn.trim is not a function)
+    const pgn = String(pgnEl.value || "").trim();
     if (!pgn) {
       progressEl.textContent = "Please paste a PGN or fetch it.";
       return;
@@ -348,7 +345,12 @@ analyzeBtn.addEventListener("click", async () => {
     const movetime = parseInt(msEl.value, 10) || 0;
     const multipv = parseInt(mpvEl.value, 10);
 
-    const summary = await runAnalysis(pgn, { depth, movetime, multipv });
+    const summary = await runAnalysis(pgn, {
+      depth,
+      movetime,
+      multipv,
+      mpv: multipv,
+    });
     lastSummary = summary;
     boardBtn.disabled = false;
     renderSummary(summary);
@@ -371,8 +373,14 @@ function waitReady() {
 
 async function runAnalysis(pgn, opts) {
   const headers = parseHeadersFromPgn(pgn);
-  const startFen =
-    headers.SetUp === "1" && headers.FEN ? headers.FEN : undefined;
+  headers.raw_pgn = pgn;
+  let startFen;
+  if (headers.SetUp === "1" && headers.FEN) {
+    startFen = headers.FEN;
+  } else {
+    const m = pgn.match(/\[FEN\s+"([^"]+)"\]/);
+    if (m) startFen = m[1];
+  }
 
   const sanTokens = extractSanTokens(pgn);
   if (!sanTokens.length) {
@@ -393,7 +401,7 @@ async function runAnalysis(pgn, opts) {
     const fenBefore = base.fen();
     const stm = base.turn();
 
-    const preArr = await analyzeFenMulti(fenBefore, opts, opts.multipv);
+    const preArr = await analyzeFenMulti(fenBefore, opts, opts.mpv || 1);
     const preBest = preArr[0];
     const preCp = infoToCp(preBest);
 
@@ -432,7 +440,6 @@ async function runAnalysis(pgn, opts) {
       postCp: playedCp,
       cpLoss,
       tag: cat.tag,
-      // for PV selector: each is { move: uci, pv: [uci...], type, value }
       pvLines: pvMap,
     };
 
@@ -470,7 +477,13 @@ async function runAnalysis(pgn, opts) {
     };
   };
 
-  return { headers, white: by("w"), black: by("b"), perMove, startFen };
+  return {
+    headers,
+    white: by("w"),
+    black: by("b"),
+    perMove,
+    startFen: startFen || undefined,
+  };
 }
 
 /* ----------------------------- Rendering ----------------------------- */
@@ -502,6 +515,9 @@ function renderSummary(s) {
     "- cpLoss = best_eval - played_eval from the same root (searchmoves).\n" +
     "- Mate evals are clamped to stabilize accuracy.\n" +
     "- Categories are heuristic but calibrated to feel similar to Chess.com.";
+
+  // allow UI module to react (graphs, animations)
+  window.dispatchEvent(new CustomEvent("wazir:summaryRendered", { detail: s }));
 }
 
 function renderBadges(container, counts) {
@@ -641,8 +657,8 @@ function extractSanTokens(pgn) {
 /* ============================ BOARD VIEW ============================== */
 
 /* Colors + sizes */
-const LIGHT = "#EEEDD2";
-const DARK = "#769656";
+const LIGHT = "#f0d9b5";
+const DARK = "#b58863";
 const H_LAST = "rgba(46, 204, 113, 0.6)";
 const H_BEST = "rgba(52, 152, 219, 0.65)";
 const SIZE = 520; // canvas size (px)
@@ -670,20 +686,42 @@ function preloadPieces() {
   const promises = [];
   for (const k of pieceKeys) {
     const img = new Image();
-    img.src = chrome.runtime.getURL(`pieces/${k}.png`);
+    const src = chrome.runtime.getURL(`pieces/${k}.png`);
+    img.src = src;
     IMAGES[k] = img;
+
     promises.push(
       new Promise((res) => {
-        if (img.complete) return res();
-        img.onload = () => res();
-        img.onerror = () => {
-          console.warn("Failed to load piece", k, img.src);
+        if (img.complete && img.naturalWidth > 0) {
+          console.log(`[pieces] already loaded: ${k} -> ${src}`);
+          return res();
+        }
+
+        img.onload = () => {
+          console.log(`[pieces] loaded: ${k} -> ${src}`, {
+            width: img.naturalWidth,
+            height: img.naturalHeight,
+          });
           res();
         };
+
+        img.onerror = (ev) => {
+          console.error(`[pieces] FAILED to load: ${k} -> ${src}`, ev);
+          res();
+        };
+
+        setTimeout(() => {
+          if (!img.complete) {
+            console.warn(`[pieces] timeout while loading: ${k} -> ${src}`);
+            res();
+          }
+        }, 2500);
       })
     );
   }
-  return Promise.all(promises);
+  return Promise.all(promises).then(() => {
+    console.log("[pieces] preload finished; IMAGES keys:", Object.keys(IMAGES));
+  });
 }
 
 /* ------------------- board state ------------------ */
@@ -734,7 +772,6 @@ function drawBoardBase() {
 
 /* Draw pieces using preloaded PNG images for Neo look */
 function drawPieces(game) {
-  // enable smoothing for high-quality downscale
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
 
@@ -747,11 +784,10 @@ function drawPieces(game) {
 
       const key = (piece.color === "w" ? "w" : "b") + piece.type.toUpperCase();
       const img = IMAGES[key];
-      if (img && img.complete) {
-        const pad = Math.round(SQ * 0.03); // small padding for nice fit
+      if (img && img.complete && img.naturalWidth > 0) {
+        const pad = Math.round(SQ * 0.03);
         ctx.drawImage(img, x + pad, y + pad, SQ - pad * 2, SQ - pad * 2);
       } else {
-        // fallback: simple circle (should rarely run)
         ctx.fillStyle = piece.color === "b" ? "#111" : "#fff";
         ctx.beginPath();
         ctx.arc(x + SQ / 2, y + SQ / 2 - 4, SQ * 0.24, 0, Math.PI * 2);
@@ -796,13 +832,11 @@ function drawArrow(from, to, color) {
   ctx.strokeStyle = color;
   ctx.globalAlpha = 0.95;
 
-  // shaft
   ctx.beginPath();
   ctx.moveTo(x1 + ux * back, y1 + uy * back);
   ctx.lineTo(x2 - ux * head, y2 - uy * head);
   ctx.stroke();
 
-  // head
   ctx.beginPath();
   ctx.moveTo(x2, y2);
   ctx.lineTo(
@@ -833,12 +867,16 @@ function toSANListFromPV(fen, pv) {
   return sanList;
 }
 
-/* ------------------ gotoPly: show best move AFTER last played move ---------------- */
+/* ------------------ gotoPly ---------------- */
 function gotoPly(ply) {
   currentPly = Math.max(0, Math.min(ply, boardPerMove.length));
   const base = new Chess(boardStartFen);
   for (let i = 0; i < currentPly; i++) {
-    base.move(boardPerMove[i].san, { sloppy: true });
+    try {
+      base.move(boardPerMove[i].san, { sloppy: true });
+    } catch (e) {
+      console.warn("apply san failed at ply", i, boardPerMove[i], e);
+    }
   }
 
   drawBoardBase();
@@ -847,27 +885,38 @@ function gotoPly(ply) {
   // Last move highlight
   if (currentPly > 0) {
     const prev = new Chess(boardStartFen);
-    for (let i = 0; i < currentPly - 1; i++)
-      prev.move(boardPerMove[i].san, { sloppy: true });
-    const last = prev.move(boardPerMove[currentPly - 1].san, { sloppy: true });
-    if (last) {
-      highlightSquares([last.from, last.to], "last");
+    for (let i = 0; i < currentPly - 1; i++) {
+      try {
+        prev.move(boardPerMove[i].san, { sloppy: true });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    try {
+      const last = prev.move(boardPerMove[currentPly - 1].san, {
+        sloppy: true,
+      });
+      if (last) highlightSquares([last.from, last.to], "last");
+    } catch (e) {
+      /* ignore */
     }
   }
 
   // Best move arrow: show engine suggestion AFTER the last played move
   let node = null;
-  if (currentPly > 0) {
-    node = boardPerMove[currentPly - 1];
-  }
+  if (currentPly > 0) node = boardPerMove[currentPly - 1];
 
   if (node && node.pvLines && node.pvLines[selectedPV]) {
     const bestUci = node.pvLines[selectedPV].move || null;
     if (bestUci) {
       const from = bestUci.slice(0, 2);
       const to = bestUci.slice(2, 4);
-      highlightSquares([from, to], "best");
-      drawArrow(from, to, "#2E86DE");
+      try {
+        highlightSquares([from, to], "best");
+        drawArrow(from, to, "#2E86DE");
+      } catch (e) {
+        /* ignore rendering errors */
+      }
     }
   }
 
@@ -879,8 +928,17 @@ function gotoPly(ply) {
   // Best move + PV text (based on node above)
   if (node && node.pvLines && node.pvLines[selectedPV]) {
     const info = node.pvLines[selectedPV];
-    const bestSAN = uciToSAN(base.fen(), info.move);
-    bestMoveEl.textContent = `Best (#${selectedPV}): ${bestSAN || info.move}`;
+    // safe uci->san (avoid throwing)
+    let bestSAN = null;
+    try {
+      bestSAN = uciToSAN(base.fen(), info.move);
+    } catch (e) {
+      console.warn("uciToSAN failed", e);
+      bestSAN = null;
+    }
+    bestMoveEl.textContent = `Best (#${selectedPV}): ${
+      bestSAN || info.move || "-"
+    }`;
     const sanList = toSANListFromPV(base.fen(), info.pv);
     pvLineEl.textContent = `PV: ${sanList.join(" ") || "-"}`;
     const evalStr =
@@ -894,7 +952,6 @@ function gotoPly(ply) {
     evalLineEl.textContent = "Eval: -";
   }
 
-  // Move list with selection
   renderMiniMoves(currentPly);
 }
 
@@ -904,22 +961,53 @@ function uciToSAN(fen, uci) {
   const from = uci.slice(0, 2);
   const to = uci.slice(2, 4);
   const promotion = uci.slice(4) || undefined;
-  const m = g.move({ from, to, promotion });
-  return m ? m.san : null;
+  // Try safely, and if illegal return null instead of throwing
+  try {
+    const m = g.move({ from, to, promotion });
+    return m ? m.san : null;
+  } catch (e) {
+    // As fallback try string-based move (shouldn't normally be needed)
+    try {
+      const m2 = g.move(from + to + (promotion || ""));
+      return m2 ? m2.san : null;
+    } catch (e2) {
+      return null;
+    }
+  }
 }
 
 function buildBoard(summary) {
+  if (!panelBoard) {
+    console.error("panel-board missing");
+    return;
+  }
+
+  // show the panel after blurring active element to avoid aria-hidden warnings
+  try {
+    if (document.activeElement && document.activeElement.blur)
+      document.activeElement.blur();
+  } catch (e) {}
+
+  // hide other panels
+  document.querySelectorAll(".panel").forEach((p) => {
+    p.classList.remove("active");
+    p.setAttribute("aria-hidden", "true");
+  });
+
+  panelBoard.classList.add("active");
+  panelBoard.setAttribute("aria-hidden", "false");
+  panelBoard.style.display = "block";
+
   boardSummary = summary;
   boardPerMove = summary?.perMove || [];
   boardStartFen = summary?.startFen;
   flipped = false;
   selectedPV = 1;
 
-  boardCard.style.display = "block";
-  boardCard.scrollIntoView({ behavior: "smooth", block: "start" });
-
+  // ensure pieces preloaded
   drawBoardBase();
   gotoPly(0);
+  boardCard.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function renderMiniMoves(selPly) {
@@ -963,7 +1051,13 @@ btnFirst.addEventListener("click", () => gotoPly(0));
 btnPrev.addEventListener("click", () => gotoPly(currentPly - 1));
 btnNext.addEventListener("click", () => gotoPly(currentPly + 1));
 btnLast.addEventListener("click", () => gotoPly(boardPerMove.length));
-btnExit.addEventListener("click", () => (boardCard.style.display = "none"));
+btnExit.addEventListener("click", () => {
+  if (panelBoard) {
+    panelBoard.style.display = "none";
+    panelBoard.classList.remove("active");
+    panelBoard.setAttribute("aria-hidden", "true");
+  }
+});
 flipEl.addEventListener("change", () => {
   flipped = !!flipEl.checked;
   drawBoardBase();
@@ -977,32 +1071,46 @@ pvButtons.forEach((b) =>
 );
 
 boardBtn.addEventListener("click", async () => {
-  // ensure pieces loaded before showing board
   await preloadPieces();
 
-  if (!lastSummary) {
-    // allow board from PGN-only if user didn’t analyze
-    const pgn = pgnEl.value.trim();
-    const san = extractSanTokens(pgn);
-    if (!san.length) {
-      autoStatus.textContent = "Board view: analyze or paste a PGN first.";
-      return;
-    }
-    const startFen =
-      parseHeadersFromPgn(pgn).SetUp === "1" && parseHeadersFromPgn(pgn).FEN
-        ? parseHeadersFromPgn(pgn).FEN
-        : undefined;
-    const perMove = san.map((s, i) => ({
-      ply: i + 1,
-      san: s,
-      pvLines: {},
-    }));
-    buildBoard({ perMove, startFen });
-  } else {
-    buildBoard(lastSummary);
+  // blur active element to avoid hiding focused element with aria-hidden
+  try {
+    if (document.activeElement && document.activeElement.blur)
+      document.activeElement.blur();
+  } catch (e) {}
+
+  // hide other panels (and mark aria-hidden)
+  document
+    .querySelectorAll(".panel")
+    .forEach((p) => p.setAttribute("aria-hidden", "true"));
+
+  const boardEl = document.getElementById("panel-board");
+  if (!boardEl) {
+    console.error("ERROR: panel-board not found in popup.html");
+    return;
   }
+  boardEl.setAttribute("aria-hidden", "false");
+  boardEl.style.display = "block";
+
+  // wait for layout
+  await new Promise((res) => requestAnimationFrame(res));
+  await new Promise((res) => requestAnimationFrame(res));
+
+  if (!lastSummary || !lastSummary.perMove) {
+    console.error("Summary missing when building board!", lastSummary);
+    return;
+  }
+
+  buildBoard(lastSummary);
+
+  await new Promise((res) => requestAnimationFrame(res));
+  gotoPly(currentPly);
 });
 
-// window.onload = () => {
-//   logTabId();
-// };
+// Expose small hooks for UI module
+window.__wazir = {
+  parseHeadersFromPgn,
+  extractSanTokens,
+  lastSummaryGetter: () => lastSummary,
+  buildBoardFromSummary: (summary) => buildBoard(summary),
+};

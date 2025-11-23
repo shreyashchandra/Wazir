@@ -6,10 +6,22 @@ async function sleep(ms) {
 
 async function findGameMeta() {
   const p = location.pathname;
+
+  // Case 1: /game/live/ID or /game/daily/ID
   let m = p.match(/\/game\/(live|daily)\/(\d+)/);
   if (m) return { kind: m[1], id: m[2] };
+
+  // Case 2: /analysis/game/live/ID
   m = p.match(/\/analysis\/game\/(live|daily)\/(\d+)/);
   if (m) return { kind: m[1], id: m[2] };
+
+  // Case 3: NEW — /game/ID  (no live/daily in URL)
+  m = p.match(/\/game\/(\d+)/);
+  if (m) {
+    // We don't know if it's live or daily, so let API tell us
+    return { kind: "auto", id: m[1] };
+  }
+
   return null;
 }
 
