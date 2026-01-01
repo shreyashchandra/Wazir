@@ -1,36 +1,113 @@
 # Wazir — Chess.com Game Review (Local Stockfish)
 
-Wazir is a privacy-first Chrome extension that analyzes your finished
-Chess.com games locally with Stockfish 17.1 Lite. It fetches the PGN,
-computes accuracy and ACPL, classifies each move, and includes a board
-view with best-move arrows and MultiPV lines — all on your machine.
+[![Manifest V3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/mv3/intro/)
+[![License](https://img.shields.io/badge/License-MIT-informational)](./LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](./CONTRIBUTING.md)
+[![Made with Stockfish](https://img.shields.io/badge/Engine-Stockfish%2017.1%20Lite-black)](https://stockfishchess.org/)
+[![Backend](https://img.shields.io/badge/Backend-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/workers/)
 
-- Local engine: Stockfish 17.1 Lite (WASM, runs in the popup)
-- PGN source: your local API or the open Chess.com game page
-- No accounts. No cloud engine calls. Open source.
+Wazir is a Chrome extension that analyzes **finished Chess.com games** locally using
+**Stockfish 17.1 Lite** and produces a Chess.com-style review: **accuracy**, **ACPL**,
+move tags, charts, a move list, and an interactive board replay with PV lines.
 
-<p align="center">
-  <img alt="Board view" src="docs/screenshot-board.png" width="720">
-</p>
+> Not affiliated with Chess.com.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [How it Works](#how-it-works)
+- [Project Structure](#project-structure)
+- [Install (Unpacked / Dev)](#install-unpacked--dev)
+- [Backend (PGN API)](#backend-pgn-api)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License & Credits](#license--credits)
+
+---
 
 ## Features
 
-- One-click PGN fetch from the active Chess.com tab (or your local API)
-- Strict PGN normalization (ordered tags, no clock comments, link with `?move=0`)
-- Local Stockfish analysis (depth or movetime, MultiPV 1–3)
-- Accuracy and ACPL per side, with move quality buckets:
-  Best, Excellent, Great, Good, Book, Miss, Inaccuracy, Mistake, Blunder
-- Board View
-  - Canvas board with Chess.com-like colors and coordinates
-  - Last-move highlight (green squares)
-  - Best-move arrow (blue), MultiPV selector
-  - Move list navigation and jump-to-ply
-  - Flip orientation
+- Fetch PGN from the current Chess.com game tab
+- Local analysis using Stockfish 17.1 Lite (Web Worker)
+- Chess.com-style **accuracy** model (win-probability based)
+- **ACPL** and move classification:
+  - book, good, excellent, best
+  - inaccuracy, mistake, blunder
+  - (plus great/brilliant heuristics)
+- Charts:
+  - advantage over time
+  - accuracy per move
+- Move list with click-to-jump
+- Board view:
+  - arrows for best line (PV)
+  - MultiPV switching (PV1/PV2/PV3)
+  - navigation + flip
+  - quick filters (blunders/mistakes/brilliants/best)
 
-## How it works
+---
 
-- The popup messages a content script in the active Chess.com tab to discover
-  the game id, usernames, and month/year.
-- Preferred: fetch PGNs via your local API (`http://localhost:3100/pgn`)
-  that returns exact, normalized PGNs.
-- The popup runs Stockfish (WASM) in a Web Worker and evaluates each position.
+## Screenshots
+
+> Add your screenshots under `assets/screenshots/` and update paths below.
+
+- Summary view  
+  ![Summary](assets/screenshots/summary.png)
+
+- Move list  
+  ![Move list](assets/screenshots/move-list.png)
+
+- Board view  
+  ![Board view](assets/screenshots/board.png)
+
+---
+
+## How it Works
+
+1. **content.js** runs on Chess.com pages and extracts:
+
+   - game id (live/daily/analysis URLs)
+   - usernames (DOM + fallback signals)
+   - timestamp/month (via Chess.com callback JSON when available)
+
+2. **popup.js**:
+
+   - requests context from the active tab
+   - fetches the PGN from a small API (Cloudflare Worker) using username + year/month
+   - parses PGN headers + SAN moves
+   - runs Stockfish analysis per ply:
+     - MultiPV on the position before the move
+     - evaluation of the played move
+   - converts eval → win% → accuracy (Chess.com-like model)
+   - renders Summary / Move List / Board tabs
+
+3. **Backend (Worker)** provides:
+   - `GET /pgn?username=...&year=YYYY&month=MM`
+   - returns an array of `{ gameID, PGN }`
+
+---
+
+## Project Structure
+
+```text
+extention/
+  manifest.json
+  popup.html
+  styles.css
+  popup.js
+  popup-ui.js
+  content.js
+  lib/
+    chess.js
+  stockfish/
+    *.js
+    *.wasm
+  pieces/
+    *.png
+  icons/
+    *.png
+```
