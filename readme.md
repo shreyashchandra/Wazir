@@ -56,13 +56,13 @@ move tags, charts, a move list, and an interactive board replay with PV lines.
 > Add your screenshots under `assets/screenshots/` and update paths below.
 
 - Summary view  
-  ![Summary](assets/screenshots/summary.png)
+  ![Summary](extention/assets/screenshots/summary.png)
 
 - Move list  
-  ![Move list](assets/screenshots/move-list.png)
+  ![Move list](extention/assets/screenshots/move-list.png)
 
 - Board view  
-  ![Board view](assets/screenshots/board.png)
+  ![Board view](extention/assets/screenshots/board.png)
 
 ---
 
