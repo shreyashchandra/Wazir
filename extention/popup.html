@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>Wazir — Game Review</title>
@@ -8,6 +8,7 @@
   </head>
   <body>
     <div id="wazir-root">
+      <!-- HEADER -->
       <header id="header">
         <div class="hdr-left">
           <img src="icons/pawn-32.png" alt="W" class="logo" />
@@ -16,12 +17,12 @@
             <div class="sub">Game Review</div>
           </div>
         </div>
-
         <div class="hdr-right">
-          <div id="opening-name" class="muted">— Opening: Unknown</div>
+          <div id="opening-name" class="muted">Opening: —</div>
         </div>
       </header>
 
+      <!-- TABS -->
       <nav id="tabs" role="tablist">
         <button
           class="tab active"
@@ -35,215 +36,259 @@
         <button class="tab" data-tab="board" role="tab">Board</button>
       </nav>
 
+      <!-- CONTENT -->
       <main id="content">
-        <!-- SUMMARY PANEL -->
+        <!-- ========== SUMMARY PANEL ========== -->
         <section id="panel-summary" class="panel active" role="tabpanel">
-          <div class="summary-grid">
-            <div class="metrics card">
-              <div class="metrics-row">
-                <div class="metric">
-                  <div class="label">White Accuracy</div>
-                  <div id="w-acc" class="big">-</div>
-                </div>
-                <div class="metric">
-                  <div class="label">Black Accuracy</div>
-                  <div id="b-acc" class="big">-</div>
-                </div>
-              </div>
-
-              <div class="metrics-row mt8">
-                <div class="metric small">
-                  <div class="label">White ACPL</div>
-                  <div id="w-acpl">-</div>
-                </div>
-                <div class="metric small">
-                  <div class="label">Black ACPL</div>
-                  <div id="b-acpl">-</div>
+          <!-- Player Cards -->
+          <div class="players-row">
+            <!-- White Player -->
+            <div class="player-card white">
+              <div class="player-header">
+                <div class="player-avatar" id="w-avatar"></div>
+                <div class="player-info">
+                  <div class="player-name" id="w-name">White</div>
+                  <div class="player-rating" id="w-rating">—</div>
                 </div>
               </div>
-
-              <div class="badges-row mt10">
-                <div id="w-badges" class="badges"></div>
-                <div id="b-badges" class="badges" style="margin-top: 6px"></div>
+              <div class="accuracy-display">
+                <div class="accuracy-label">Accuracy</div>
+                <div class="accuracy-value" id="w-accuracy">—</div>
               </div>
-
-              <div class="controls mt12">
-                <button id="btn-auto" class="btn primary">
-                  Get PGN from page
-                </button>
-                <div class="select-row">
-                  <label class="label-inline">
-                    Depth
-                    <select id="depth" class="styled-select">
-                      <option value="10">d10</option>
-                      <option value="14">d14</option>
-                      <option value="18">d18</option>
-                      <option value="20" selected>d20</option>
-                    </select>
-                  </label>
-                  <label class="label-inline">
-                    ms
-                    <input
-                      id="ms"
-                      type="number"
-                      min="40"
-                      max="10000"
-                      value="50"
-                    />
-                  </label>
-                  <label class="label-inline">
-                    MultiPV
-                    <select id="mpv" class="styled-select">
-                      <option value="1">1</option>
-                      <option value="2">2</option>
-                      <option value="3" selected>3</option>
-                    </select>
-                  </label>
-                  <button id="analyze" class="btn accent">Analyze</button>
-                </div>
+              <div class="acpl-display">
+                <span>ACPL:</span>
+                <span id="w-acpl">—</span>
               </div>
-
-              <div class="notes mt10 card small muted" id="notes">Notes: -</div>
+              <div class="move-badges" id="w-badges"></div>
             </div>
 
-            <div class="charts card">
-              <div class="chart-header">
-                <div class="label">Accuracy Graph</div>
-                <div class="muted small">per ply</div>
+            <!-- Black Player -->
+            <div class="player-card black">
+              <div class="player-header">
+                <div class="player-avatar" id="b-avatar"></div>
+                <div class="player-info">
+                  <div class="player-name" id="b-name">Black</div>
+                  <div class="player-rating" id="b-rating">—</div>
+                </div>
               </div>
-              <canvas id="acc-graph" width="700" height="160"></canvas>
-
-              <div class="chart-header mt8">
-                <div class="label">Advantage Graph</div>
-                <div class="muted small">engine eval (centipawns)</div>
+              <div class="accuracy-display">
+                <div class="accuracy-label">Accuracy</div>
+                <div class="accuracy-value" id="b-accuracy">—</div>
               </div>
-              <canvas id="adv-graph" width="700" height="120"></canvas>
+              <div class="acpl-display">
+                <span>ACPL:</span>
+                <span id="b-acpl">—</span>
+              </div>
+              <div class="move-badges" id="b-badges"></div>
             </div>
           </div>
 
-          <div class="progress" style="margin-top: 10px">
-            <div id="bar" class="bar"></div>
-          </div>
-          <div id="progress" class="small muted mt6" aria-live="polite">
-            Ready
+          <!-- Charts -->
+          <div class="charts-section">
+            <div class="chart-container">
+              <div class="chart-label">Advantage</div>
+              <canvas
+                id="adv-graph"
+                class="chart-canvas"
+                width="900"
+                height="80"
+              ></canvas>
+            </div>
+            <div class="chart-container">
+              <div class="chart-label">Accuracy per Move</div>
+              <canvas
+                id="acc-graph"
+                class="chart-canvas"
+                width="900"
+                height="60"
+              ></canvas>
+            </div>
           </div>
 
-          <div class="pgn-box mt10 card">
+          <!-- Controls -->
+          <div class="controls-section">
+            <div class="controls-row">
+              <button id="btn-auto" class="btn primary">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path
+                    d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"
+                  />
+                </svg>
+                Get PGN
+              </button>
+
+              <div class="control-group">
+                <span class="control-label">Depth</span>
+                <select id="depth" class="styled-select">
+                  <option value="12">12</option>
+                  <option value="16">16</option>
+                  <option value="18">18</option>
+                  <option value="20" selected>20</option>
+                  <option value="22">22</option>
+                </select>
+              </div>
+
+              <div class="control-group">
+                <span class="control-label">Time (ms)</span>
+                <input
+                  id="ms"
+                  type="number"
+                  class="styled-input"
+                  min="50"
+                  max="5000"
+                  value="100"
+                />
+              </div>
+
+              <div class="control-group">
+                <span class="control-label">MultiPV</span>
+                <select id="mpv" class="styled-select">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3" selected>3</option>
+                </select>
+              </div>
+
+              <button id="btn-analyze" class="btn accent">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+                Analyze
+              </button>
+
+              <button id="btn-board" class="btn secondary" disabled>
+                Board View
+              </button>
+            </div>
+
+            <div class="progress-section">
+              <div class="progress-bar">
+                <div class="progress-fill" id="progress-bar"></div>
+              </div>
+              <div class="progress-text" id="progress-text">Ready</div>
+            </div>
+          </div>
+
+          <!-- PGN Input -->
+          <div class="pgn-section">
             <textarea
-              id="pgn"
-              placeholder="Paste PGN here or fetch from page..."
+              id="pgn-input"
+              class="pgn-textarea"
+              placeholder="Paste PGN here or click 'Get PGN' to fetch from Chess.com..."
             ></textarea>
-            <div class="pgn-actions">
-              <button id="board-view" class="btn" disabled>Board view</button>
-              <div
-                id="auto-status"
-                class="muted small"
-                role="status"
-                aria-live="polite"
-              >
-                Paste PGN below if auto-fetch fails.
-              </div>
-            </div>
           </div>
         </section>
 
-        <!-- MOVES PANEL -->
+        <!-- ========== MOVES PANEL ========== -->
         <section
           id="panel-moves"
           class="panel"
           role="tabpanel"
           aria-hidden="true"
         >
-          <div class="moves-container card">
-            <div id="title" class="title muted">-</div>
-            <div id="moves" class="move-list"></div>
+          <div class="moves-header">
+            <div class="moves-title" id="moves-title">Game Moves</div>
+            <div class="moves-subtitle" id="moves-subtitle">—</div>
           </div>
+          <div class="moves-list" id="moves-list"></div>
         </section>
 
-        <!-- BOARD PANEL -->
+        <!-- ========== BOARD PANEL ========== -->
         <section
           id="panel-board"
           class="panel"
           role="tabpanel"
           aria-hidden="true"
         >
-          <div class="board-wrap card">
-            <div class="board-left">
-              <div class="board-canvas-wrap" id="board-canvas-wrap">
-                <!-- width/height attributes present; JS will do HiDPI scaling -->
-                <canvas id="board-canvas" width="520" height="520"></canvas>
-                <div id="coords" class="coords" aria-hidden="true"></div>
+          <div class="board-layout">
+            <!-- Eval Bar -->
+            <div class="eval-bar-container" id="eval-bar">
+              <div class="eval-bar-white" id="eval-bar-white"></div>
+              <div class="eval-bar-value top" id="eval-top">—</div>
+              <div class="eval-bar-value bottom" id="eval-bottom">—</div>
+            </div>
 
+            <!-- Board -->
+            <div class="board-section">
+              <div class="board-wrapper" id="board-wrapper">
+                <canvas id="board-canvas" width="480" height="480"></canvas>
+                <div class="board-coords" id="board-coords"></div>
+                <div class="board-overlay" id="board-overlay"></div>
                 <div
-                  id="move-badge"
-                  class="move-badge"
-                  aria-hidden="true"
-                ></div>
-                <div
-                  id="board-overlay"
-                  class="board-overlay"
-                  aria-hidden="true"
+                  class="move-badge-overlay"
+                  id="move-badge-overlay"
+                  style="display: none"
                 ></div>
               </div>
 
-              <!-- BOARD CONTROLS -->
-              <div
-                class="board-controls mt8"
-                role="group"
-                aria-label="Board controls"
-              >
-                <button
-                  id="btn-first"
-                  class="small-btn"
-                  aria-label="First move"
-                >
-                  |&lt;
+              <div class="board-controls">
+                <button class="nav-btn" id="btn-first" title="First">⏮</button>
+                <button class="nav-btn" id="btn-prev" title="Previous">
+                  ◀
                 </button>
-                <button
-                  id="btn-prev"
-                  class="small-btn"
-                  aria-label="Previous move"
-                >
-                  &lt;
-                </button>
-                <div id="ply-indicator" class="muted">-/-</div>
-                <button id="btn-next" class="small-btn" aria-label="Next move">
-                  &gt;
-                </button>
-                <button id="btn-last" class="small-btn" aria-label="Last move">
-                  &gt;|
-                </button>
-                <div style="flex: 1"></div>
-                <label class="muted small">
-                  Flip <input id="flip" type="checkbox" />
+                <div class="ply-display" id="ply-display">0/0</div>
+                <button class="nav-btn" id="btn-next" title="Next">▶</button>
+                <button class="nav-btn" id="btn-last" title="Last">⏭</button>
+
+                <div class="spacer"></div>
+
+                <label class="flip-toggle">
+                  <input type="checkbox" id="flip-board" />
+                  Flip
                 </label>
-                <button id="btn-exit" class="btn">Back</button>
+
+                <button class="btn secondary" id="btn-back">Back</button>
               </div>
 
-              <!-- QUICK FILTERS (OPTION A) -->
-              <div id="quick-filters" class="quick-filters mt10">
-                <button data-tag="blunder">Blunders</button>
-                <button data-tag="great">Great</button>
-                <button data-tag="best">Best</button>
+              <div class="quick-filters">
+                <button class="filter-btn" data-filter="blunder">
+                  Blunders
+                </button>
+                <button class="filter-btn" data-filter="mistake">
+                  Mistakes
+                </button>
+                <button class="filter-btn" data-filter="brilliant">
+                  Brilliant
+                </button>
+                <button class="filter-btn" data-filter="best">Best</button>
               </div>
             </div>
 
-            <div class="board-right">
-              <div id="pos-header" class="muted small">-</div>
-
-              <div class="pos-info">
-                <div id="best-move" class="mono">Best: -</div>
-                <div id="pv-line" class="small muted">PV: -</div>
-                <div id="eval-line" class="small muted">Eval: -</div>
+            <!-- Info Panel -->
+            <div class="info-panel">
+              <div class="pos-info-card">
+                <div class="pos-info-label">Position</div>
+                <div class="pos-info-value" id="pos-fen">—</div>
               </div>
 
-              <div class="pv-controls mt8" aria-label="Engine PV controls">
-                <button class="pv-btn" data-pv="1">PV1</button>
+              <div class="best-move-display">
+                <div class="best-move-label">Best Move</div>
+                <div class="best-move-san" id="best-move-san">—</div>
+                <div class="pv-line" id="pv-line">PV: —</div>
+                <div class="eval-display" id="eval-display">—</div>
+              </div>
+
+              <div class="pv-buttons">
+                <button class="pv-btn active" data-pv="1">PV1</button>
                 <button class="pv-btn" data-pv="2">PV2</button>
                 <button class="pv-btn" data-pv="3">PV3</button>
               </div>
 
-              <div class="mini-moves mt10" id="mini-moves"></div>
+              <div class="mini-moves" id="mini-moves"></div>
             </div>
           </div>
         </section>
@@ -251,6 +296,5 @@
     </div>
 
     <script type="module" src="popup.js"></script>
-    <script type="module" src="popup-ui.js"></script>
   </body>
 </html>
