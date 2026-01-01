@@ -1,8 +1,3 @@
----
-
-### `CONTRIBUTING.md`
-
-```md
 # Contributing to Wazir
 
 Thanks for contributing! This document explains how to set up the project, propose
@@ -16,22 +11,21 @@ changes, and submit pull requests.
 - Documentation (README, screenshots, troubleshooting)
 - Backend improvements (faster matching, caching, rate limiting)
 
----
-
 ## Development Setup
 
-### 1) Extension (Chrome MV3)
+### Extension (Chrome MV3)
 
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
-3. **Load unpacked** → select the folder containing `manifest.json`
+3. Click **Load unpacked**
+4. Select the folder containing `manifest.json`
 
 To test:
 
 - Open a finished Chess.com game page
 - Open the extension popup → Get PGN → Analyze
 
-### 2) Backend (Cloudflare Worker)
+### Backend (Cloudflare Worker)
 
 In the worker project:
 
