@@ -159,7 +159,7 @@ let ctx = boardCanvas.getContext("2d");
    CONSTANTS
    ============================================================ */
 
-const BOARD_SIZE = 480;
+const BOARD_SIZE = 375;
 const SQ_SIZE = BOARD_SIZE / 8;
 
 const COLORS = {
