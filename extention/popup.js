@@ -1,20 +1,22 @@
-// popup.js — Wazir Premium: Chess.com-accurate analysis engine
+// popup.js — Wazir Premium: Chess.com-accurate analysis engine (fixed POV + UCI)
+// DROP-IN FILE (PART 1/3). Copy-paste into popup.js, replacing your whole file.
+// Then ask me for PART 2/3.
+
 import { Chess } from "./lib/chess.js";
 
 const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
 
 /* ============================================================
-   CHESS.COM ACCURACY MODEL
-   
-   Chess.com uses win probability to calculate accuracy:
+   CHESS.COM ACCURACY MODEL (as you described)
+
    - Win% = 50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
    - Accuracy per move = 103.1668 * exp(-0.04354 * winLoss) - 3.1669
-   - Clamped to [0, 100]
+   - Clamp [0, 100]
    ============================================================ */
 
 function cpToWinPercent(cp) {
-  cp = Math.max(-1000, Math.min(1000, cp));
-  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
+  const clamped = Math.max(-1000, Math.min(1000, cp));
+  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * clamped)) - 1);
 }
 
 function mateToWinPercent(mateIn) {
@@ -25,20 +27,13 @@ function mateToWinPercent(mateIn) {
 
 function evalToWinPercent(info) {
   if (!info) return 50;
-  if (info.type === "mate") {
-    return mateToWinPercent(info.value);
-  }
+  if (info.type === "mate") return mateToWinPercent(info.value);
   return cpToWinPercent(info.value);
 }
 
-function winPercentToAccuracy(winBefore, winAfter, isWhite) {
-  let winLoss;
-  if (isWhite) {
-    winLoss = winBefore - winAfter;
-  } else {
-    winLoss = 100 - winBefore - (100 - winAfter);
-  }
-
+// IMPORTANT: use moverWin% (not whiteWin% vs blackWin% branching)
+function winPercentToAccuracy(winBefore, winAfter) {
+  const winLoss = winBefore - winAfter;
   if (winLoss <= 0) return 100;
 
   const accuracy = 103.1668 * Math.exp(-0.04354 * winLoss) - 3.1669;
@@ -51,13 +46,21 @@ function classifyMoveChessCom(
   cpAfter,
   preTop,
   playedInfo,
-  ply
+  ply,
 ) {
-  // Check for brilliant move
+  // Convert UCI score objects to a comparable cp scale.
+  const toCp = (info) => {
+    if (!info) return 0;
+    if (info.type === "cp") return info.value;
+    if (info.type === "mate") return info.value > 0 ? 1000 : -1000;
+    return 0;
+  };
+
+  // "Brilliant / Great" (still heuristic; correctness fixes happen elsewhere)
   if (preTop && preTop.length >= 2 && playedInfo) {
-    const bestCp = preTop[0]?.type === "cp" ? preTop[0].value : 0;
-    const playedCp = playedInfo?.type === "cp" ? -playedInfo.value : 0;
-    const secondCp = preTop[1]?.type === "cp" ? preTop[1].value : 0;
+    const bestCp = toCp(preTop[0]);
+    const secondCp = toCp(preTop[1]);
+    const playedCp = toCp(playedInfo);
 
     if (
       winLoss <= 2 &&
@@ -76,12 +79,12 @@ function classifyMoveChessCom(
     }
   }
 
-  // Book moves
+  // Book (rough; real Chess.com uses opening DB)
   if (ply <= 12 && Math.abs(cpBefore) <= 30 && Math.abs(cpAfter) <= 30) {
     return { tag: "book", symbol: "" };
   }
 
-  // Classification by win% loss
+  // Classification by mover win% loss
   if (winLoss <= 2) return { tag: "best", symbol: "" };
   if (winLoss <= 5) return { tag: "excellent", symbol: "" };
   if (winLoss <= 10) return { tag: "good", symbol: "" };
@@ -132,7 +135,6 @@ const movesSubtitle = $("#moves-subtitle");
 
 // Board panel
 const boardCanvas = $("#board-canvas");
-const boardWrapper = $("#board-wrapper");
 const boardCoords = $("#board-coords");
 const boardOverlay = $("#board-overlay");
 const moveBadgeOverlay = $("#move-badge-overlay");
@@ -211,7 +213,7 @@ function initEngine() {
 
   try {
     engine = new Worker(
-      chrome.runtime.getURL("stockfish/stockfish-17.1-lite-single-03e3232.js")
+      chrome.runtime.getURL("stockfish/stockfish-17.1-lite-single-03e3232.js"),
     );
   } catch (err) {
     console.error("Engine init failed:", err);
@@ -243,13 +245,12 @@ function initEngine() {
 }
 
 function shutdownEngine() {
-  if (engine) {
-    try {
-      engine.terminate();
-    } catch (e) {}
-    engine = null;
-    engineReady = false;
-  }
+  if (!engine) return;
+  try {
+    engine.terminate();
+  } catch (e) {}
+  engine = null;
+  engineReady = false;
 }
 
 function post(cmd) {
@@ -271,16 +272,23 @@ function waitEngineReady(timeout = 7000) {
   });
 }
 
-function parseMultiPVInfo(line) {
-  const mpvMatch = line.match(/\bmultipv\s+(\d+)/);
+/* ============================================================
+   UCI PARSING + POV FIXES (THE CORE BUG FIX)
+   ============================================================ */
+
+// Robust: handles lines WITH or WITHOUT "multipv"
+function parseUciInfo(line) {
+  if (!line.startsWith("info ")) return null;
+
   const scoreMatch = line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
+  if (!scoreMatch) return null;
+
+  const mpvMatch = line.match(/\bmultipv\s+(\d+)/);
   const pvMatch = line.match(/\bpv\s+(.+)$/);
   const depthMatch = line.match(/\bdepth\s+(\d+)/);
 
-  if (!mpvMatch || !scoreMatch) return null;
-
   return {
-    multipv: parseInt(mpvMatch[1], 10),
+    multipv: mpvMatch ? parseInt(mpvMatch[1], 10) : 1,
     type: scoreMatch[1],
     value: parseInt(scoreMatch[2], 10),
     pv: pvMatch ? pvMatch[1].trim().split(/\s+/) : [],
@@ -288,10 +296,44 @@ function parseMultiPVInfo(line) {
   };
 }
 
+function flipEval(info) {
+  if (!info) return null;
+  return { ...info, value: -info.value };
+}
+
+// Stockfish score is from side-to-move POV at root.
+// Convert to White POV so UI/eval bar/charts are consistent.
+function evalFromWhitePov(info, sideToMove) {
+  if (!info) return null;
+  return sideToMove === "w" ? info : flipEval(info);
+}
+
+function toCpWhite(info) {
+  if (!info) return 0;
+  if (info.type === "cp") return info.value;
+  if (info.type === "mate") return info.value > 0 ? 1000 : -1000;
+  return 0;
+}
+
+// Convert a White-POV cp into mover-POV cp (mover is sideToMove at root)
+function toMoverCpFromWhiteCp(cpWhite, sideToMove) {
+  return sideToMove === "w" ? cpWhite : -cpWhite;
+}
+
+function moverWinPercentFromWhiteEval(whiteEvalInfo, sideToMove) {
+  const whiteWin = evalToWinPercent(whiteEvalInfo);
+  return sideToMove === "w" ? whiteWin : 100 - whiteWin;
+}
+
+/* ============================================================
+   ENGINE QUERIES
+   ============================================================ */
+
 function analyzePosition(fen, opts, multipv) {
   return new Promise((resolve) => {
     if (!engine) return resolve([]);
 
+    /** @type {Record<number, any>} */
     const results = {};
     let resolved = false;
 
@@ -299,10 +341,13 @@ function analyzePosition(fen, opts, multipv) {
       const line = typeof e.data === "string" ? e.data : e.data?.data;
       if (!line || resolved) return;
 
-      if (line.startsWith("info ") && line.includes("multipv")) {
-        const info = parseMultiPVInfo(line);
+      if (line.startsWith("info ") && line.includes("score")) {
+        const info = parseUciInfo(line);
         if (info && info.multipv <= multipv) {
-          results[info.multipv] = info;
+          const prev = results[info.multipv];
+          if (!prev || info.depth >= prev.depth) {
+            results[info.multipv] = info;
+          }
         }
       } else if (line.startsWith("bestmove ")) {
         resolved = true;
@@ -315,26 +360,23 @@ function analyzePosition(fen, opts, multipv) {
     engine.addEventListener("message", handler);
 
     const tid = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        try {
-          engine.removeEventListener("message", handler);
-        } catch (e) {}
-        resolve(Object.values(results).sort((a, b) => a.multipv - b.multipv));
-      }
+      if (resolved) return;
+      resolved = true;
+      try {
+        engine.removeEventListener("message", handler);
+      } catch (e) {}
+      resolve(Object.values(results).sort((a, b) => a.multipv - b.multipv));
     }, ENGINE_TIMEOUT);
 
     post(`position fen ${fen}`);
+
     if (multipv !== currentMultiPV) {
       post(`setoption name MultiPV value ${multipv}`);
       currentMultiPV = multipv;
     }
 
-    if (opts.movetime) {
-      post(`go movetime ${opts.movetime}`);
-    } else {
-      post(`go depth ${opts.depth}`);
-    }
+    if (opts.movetime) post(`go movetime ${opts.movetime}`);
+    else post(`go depth ${opts.depth}`);
   });
 }
 
@@ -351,7 +393,7 @@ function analyzeMove(fen, moveObj, opts) {
       if (!line || resolved) return;
 
       if (line.startsWith("info ") && line.includes("score")) {
-        const info = parseMultiPVInfo(line);
+        const info = parseUciInfo(line);
         if (info) result = info;
       } else if (line.startsWith("bestmove ")) {
         resolved = true;
@@ -364,16 +406,22 @@ function analyzeMove(fen, moveObj, opts) {
     engine.addEventListener("message", handler);
 
     const tid = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        try {
-          engine.removeEventListener("message", handler);
-        } catch (e) {}
-        resolve(result);
-      }
+      if (resolved) return;
+      resolved = true;
+      try {
+        engine.removeEventListener("message", handler);
+      } catch (e) {}
+      resolve(result);
     }, ENGINE_TIMEOUT);
 
     post(`position fen ${fen}`);
+
+    // Searchmoves analysis is cleaner with MultiPV=1
+    if (currentMultiPV !== 1) {
+      post("setoption name MultiPV value 1");
+      currentMultiPV = 1;
+    }
+
     if (opts.movetime) {
       post(`go movetime ${opts.movetime} searchmoves ${uci}`);
     } else {
@@ -383,6 +431,13 @@ function analyzeMove(fen, moveObj, opts) {
 }
 
 /* ============================================================
+   PART 2/3 continues: PGN parsing + runAnalysis + UI rendering
+   ============================================================ */
+
+// popup.js — DROP-IN FILE (PART 2/3)
+// Copy-paste this directly BELOW PART 1/3 (do not remove anything from PART 1).
+
+/* ============================================================
    PGN PARSING
    ============================================================ */
 
@@ -390,9 +445,7 @@ function parseHeaders(pgn) {
   const headers = {};
   const re = /\[(\w+)\s+"([^"]*)"\]/g;
   let m;
-  while ((m = re.exec(pgn))) {
-    headers[m[1]] = m[2];
-  }
+  while ((m = re.exec(pgn))) headers[m[1]] = m[2];
   return headers;
 }
 
@@ -403,6 +456,7 @@ function extractMoves(pgn) {
     .replace(/;[^\n]*/g, " ")
     .replace(/\$\d+/g, " ");
 
+  // Remove RAVs (variations)
   while (/\([^()]*\)/.test(s)) {
     s = s.replace(/\([^()]*\)/g, " ");
   }
@@ -424,7 +478,9 @@ function extractMoves(pgn) {
 }
 
 /* ============================================================
-   ANALYSIS ENGINE
+   ANALYSIS ENGINE (FIXED POV + FIXED parsing use)
+   - All evals stored in analysis are White POV.
+   - cpLoss/ACPL computed as mover POV so black isn't inverted.
    ============================================================ */
 
 let lastAnalysis = null;
@@ -452,21 +508,24 @@ async function runAnalysis(pgn, opts) {
   for (let i = 0; i < total; i++) {
     const san = sanMoves[i];
     const fenBefore = game.fen();
-    const stm = game.turn();
-    const isWhite = stm === "w";
+    const stm = game.turn(); // 'w' or 'b'
 
-    const preTop = await analyzePosition(fenBefore, opts, opts.multipv || 3);
-    const bestInfo = preTop[0];
-    const bestCp =
-      bestInfo?.type === "cp"
-        ? bestInfo.value
-        : bestInfo?.type === "mate"
-        ? bestInfo.value > 0
-          ? 1000
-          : -1000
-        : 0;
-    const winBefore = evalToWinPercent(bestInfo);
+    // Analyze the position BEFORE the move (best lines)
+    const preTopRoot = await analyzePosition(
+      fenBefore,
+      opts,
+      opts.multipv || 3,
+    );
 
+    const bestInfoRoot = preTopRoot[0] || null;
+
+    // Convert best eval to White POV for consistent display
+    const bestInfoWhite = evalFromWhitePov(bestInfoRoot, stm);
+    const bestCpWhite = toCpWhite(bestInfoWhite);
+    const bestCpMover = toMoverCpFromWhiteCp(bestCpWhite, stm);
+    const winBefore = moverWinPercentFromWhiteEval(bestInfoWhite, stm);
+
+    // Parse/validate SAN
     const testGame = new Chess(fenBefore);
     const moveObj = testGame.move(san, { sloppy: true });
     if (!moveObj) {
@@ -474,63 +533,70 @@ async function runAnalysis(pgn, opts) {
       break;
     }
 
-    const playedInfo = await analyzeMove(fenBefore, moveObj, opts);
+    // Evaluate the PLAYED move using searchmoves
+    const playedInfoRoot = await analyzeMove(fenBefore, moveObj, opts);
+    const playedInfoWhite = evalFromWhitePov(playedInfoRoot, stm);
+    const playedCpWhite = toCpWhite(playedInfoWhite);
+    const playedCpMover = toMoverCpFromWhiteCp(playedCpWhite, stm);
+    const winAfter = moverWinPercentFromWhiteEval(playedInfoWhite, stm);
 
-    let postCp = 0;
-    if (playedInfo) {
-      if (playedInfo.type === "cp") {
-        postCp = -playedInfo.value;
-      } else if (playedInfo.type === "mate") {
-        postCp = playedInfo.value > 0 ? -1000 : 1000;
-      }
-    }
-
-    const winAfter = 100 - evalToWinPercent(playedInfo);
-
+    // Make the move on the main game
     game.move(moveObj);
 
-    let winLoss;
-    if (isWhite) {
-      winLoss = winBefore - winAfter;
-    } else {
-      winLoss = 100 - winBefore - (100 - winAfter);
-    }
-    winLoss = Math.max(0, winLoss);
+    const winLoss = Math.max(0, winBefore - winAfter);
+    const moveAccuracy = winPercentToAccuracy(winBefore, winAfter);
 
-    const moveAccuracy = winPercentToAccuracy(winBefore, winAfter, isWhite);
+    // Convert PV lines to White POV for consistent downstream usage
+    const preTopWhite = (preTopRoot || []).map((line) =>
+      evalFromWhitePov(line, stm),
+    );
 
     const classification = classifyMoveChessCom(
       winLoss,
-      bestCp,
-      postCp,
-      preTop,
-      playedInfo,
-      i + 1
+      bestCpWhite,
+      playedCpWhite,
+      preTopWhite,
+      playedInfoWhite,
+      i + 1,
     );
 
+    // Build PV map (White POV)
     const pvMap = {};
-    for (const line of preTop) {
+    for (const line of preTopWhite) {
       pvMap[line.multipv] = line;
     }
 
     const entry = {
       ply: i + 1,
-      color: isWhite ? "white" : "black",
+      color: stm === "w" ? "white" : "black",
       san,
       uci: moveObj.from + moveObj.to + (moveObj.promotion || ""),
       fenBefore,
       fenAfter: game.fen(),
-      evalBefore: bestInfo,
-      evalAfter: playedInfo,
+
+      // Always White POV in stored analysis
+      evalBefore: bestInfoWhite,
+      evalAfter: playedInfoWhite,
+
+      // Mover win% (not always White)
       winBefore,
       winAfter,
       winLoss,
+
       accuracy: moveAccuracy,
-      cpLoss: Math.max(0, bestCp - postCp),
+
+      // ACPL-ish: loss in mover POV (so black is correct)
+      cpLoss: Math.max(0, bestCpMover - playedCpMover),
+
       tag: classification.tag,
       symbol: classification.symbol,
+
+      // PV lines stored as White POV
       pvLines: pvMap,
-      bestMove: bestInfo?.pv?.[0] || null,
+
+      // Still keep bestMove UCI from root PV (UCI is same regardless of POV)
+      bestMove: bestInfoRoot?.pv?.[0] || null,
+
       from: moveObj.from,
       to: moveObj.to,
     };
@@ -546,8 +612,10 @@ async function runAnalysis(pgn, opts) {
     if (!arr.length) return { accuracy: 0, acpl: 0, counts: {} };
 
     const avgAccuracy =
-      arr.reduce((sum, m) => sum + m.accuracy, 0) / arr.length;
-    const avgCpLoss = arr.reduce((sum, m) => sum + m.cpLoss, 0) / arr.length;
+      arr.reduce((sum, m) => sum + (m.accuracy || 0), 0) / arr.length;
+
+    const avgCpLoss =
+      arr.reduce((sum, m) => sum + (m.cpLoss || 0), 0) / arr.length;
 
     const counts = {
       brilliant: arr.filter((m) => m.tag === "brilliant").length,
@@ -594,7 +662,7 @@ function getAccuracyClass(accuracy) {
 }
 
 function renderBadges(container, counts) {
-  if (!container) return;
+  if (!container || !counts) return;
 
   const order = [
     ["brilliant", "💎"],
@@ -609,20 +677,20 @@ function renderBadges(container, counts) {
   ];
 
   container.innerHTML = order
-    .filter(([key]) => counts[key] > 0)
+    .filter(([key]) => (counts[key] || 0) > 0)
     .map(
       ([key, icon]) => `
       <div class="move-badge" data-type="${key}">
         <span class="icon">${icon}</span>
         <span>${counts[key]}</span>
       </div>
-    `
+    `,
     )
     .join("");
 }
 
 function renderSummary(analysis) {
-  const h = analysis.headers;
+  const h = analysis.headers || {};
 
   // Player names
   if (wNameEl) wNameEl.textContent = h.White || "White";
@@ -634,19 +702,19 @@ function renderSummary(analysis) {
   if (wAccuracyEl) {
     wAccuracyEl.textContent = `${analysis.white.accuracy}%`;
     wAccuracyEl.className = `accuracy-value ${getAccuracyClass(
-      analysis.white.accuracy
+      analysis.white.accuracy,
     )}`;
   }
   if (bAccuracyEl) {
     bAccuracyEl.textContent = `${analysis.black.accuracy}%`;
     bAccuracyEl.className = `accuracy-value ${getAccuracyClass(
-      analysis.black.accuracy
+      analysis.black.accuracy,
     )}`;
   }
 
   // ACPL
-  if (wAcplEl) wAcplEl.textContent = analysis.white.acpl;
-  if (bAcplEl) bAcplEl.textContent = analysis.black.acpl;
+  if (wAcplEl) wAcplEl.textContent = String(analysis.white.acpl);
+  if (bAcplEl) bAcplEl.textContent = String(analysis.black.acpl);
 
   // Badges
   renderBadges(wBadgesEl, analysis.white.counts);
@@ -659,14 +727,10 @@ function renderSummary(analysis) {
     openingNameEl.textContent = `Opening: ${opening}`;
   }
 
-  // Render charts
-  renderAdvantageChart(analysis.perMove);
-  renderAccuracyChart(analysis.perMove);
-
-  // Render moves list
+  renderAdvantageChart(analysis.perMove || []);
+  renderAccuracyChart(analysis.perMove || []);
   renderMovesList(analysis);
 
-  // Enable board button
   if (btnBoard) btnBoard.disabled = false;
 
   setProgress("Analysis complete", 100);
@@ -675,57 +739,56 @@ function renderSummary(analysis) {
 
 /* ============================================================
    CHARTS
+   - perMove evals are stored as White POV, so do NOT negate here.
    ============================================================ */
 
 function renderAdvantageChart(perMove) {
   if (!advCanvas) return;
-  const ctx = advCanvas.getContext("2d");
+
+  const ctx2 = advCanvas.getContext("2d");
   const w = advCanvas.width;
   const h = advCanvas.height;
 
-  ctx.clearRect(0, 0, w, h);
-
+  ctx2.clearRect(0, 0, w, h);
   if (!perMove.length) return;
 
   // Background
-  ctx.fillStyle = "#272522";
-  ctx.fillRect(0, 0, w, h);
+  ctx2.fillStyle = "#272522";
+  ctx2.fillRect(0, 0, w, h);
 
-  // Center line (0 eval)
+  // Center line
   const centerY = h / 2;
-  ctx.strokeStyle = "#4a4745";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, centerY);
-  ctx.lineTo(w, centerY);
-  ctx.stroke();
+  ctx2.strokeStyle = "#4a4745";
+  ctx2.lineWidth = 1;
+  ctx2.beginPath();
+  ctx2.moveTo(0, centerY);
+  ctx2.lineTo(w, centerY);
+  ctx2.stroke();
 
-  // Build points
   const points = [];
-  const maxEval = 500; // Clamp display at ±5 pawns
+  const maxEval = 500; // clamp ±5.0 pawns
 
   for (let i = 0; i < perMove.length; i++) {
     const m = perMove[i];
     let cp = 0;
+
     if (m.evalBefore) {
-      if (m.evalBefore.type === "cp") {
-        cp = m.evalBefore.value;
-      } else if (m.evalBefore.type === "mate") {
+      if (m.evalBefore.type === "cp") cp = m.evalBefore.value;
+      else if (m.evalBefore.type === "mate")
         cp = m.evalBefore.value > 0 ? 1000 : -1000;
-      }
     }
+
     points.push(Math.max(-maxEval, Math.min(maxEval, cp)));
   }
 
-  // Add final position
+  // Add final point from last evalAfter (also White POV)
   const lastMove = perMove[perMove.length - 1];
   if (lastMove?.evalAfter) {
     let cp = 0;
-    if (lastMove.evalAfter.type === "cp") {
-      cp = -lastMove.evalAfter.value;
-    } else if (lastMove.evalAfter.type === "mate") {
-      cp = lastMove.evalAfter.value > 0 ? -1000 : 1000;
-    }
+    if (lastMove.evalAfter.type === "cp") cp = lastMove.evalAfter.value;
+    else if (lastMove.evalAfter.type === "mate")
+      cp = lastMove.evalAfter.value > 0 ? 1000 : -1000;
+
     points.push(Math.max(-maxEval, Math.min(maxEval, cp)));
   }
 
@@ -735,59 +798,51 @@ function renderAdvantageChart(perMove) {
   const graphW = w - padding * 2;
   const graphH = h - padding * 2;
 
-  // Draw filled area
-  ctx.beginPath();
-  ctx.moveTo(padding, centerY);
+  // Fill
+  ctx2.beginPath();
+  ctx2.moveTo(padding, centerY);
 
   for (let i = 0; i < points.length; i++) {
     const x = padding + (i / (points.length - 1)) * graphW;
     const y = centerY - (points[i] / maxEval) * (graphH / 2);
-    if (i === 0) {
-      ctx.lineTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
+    ctx2.lineTo(x, y);
   }
 
-  ctx.lineTo(padding + graphW, centerY);
-  ctx.closePath();
+  ctx2.lineTo(padding + graphW, centerY);
+  ctx2.closePath();
 
-  // Gradient fill
-  const gradient = ctx.createLinearGradient(0, 0, 0, h);
+  const gradient = ctx2.createLinearGradient(0, 0, 0, h);
   gradient.addColorStop(0, "rgba(255, 255, 255, 0.8)");
   gradient.addColorStop(0.5, "rgba(128, 128, 128, 0.3)");
   gradient.addColorStop(1, "rgba(64, 61, 57, 0.8)");
-  ctx.fillStyle = gradient;
-  ctx.fill();
+  ctx2.fillStyle = gradient;
+  ctx2.fill();
 
-  // Draw line
-  ctx.beginPath();
+  // Line
+  ctx2.beginPath();
   for (let i = 0; i < points.length; i++) {
     const x = padding + (i / (points.length - 1)) * graphW;
     const y = centerY - (points[i] / maxEval) * (graphH / 2);
-    if (i === 0) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
+    if (i === 0) ctx2.moveTo(x, y);
+    else ctx2.lineTo(x, y);
   }
-  ctx.strokeStyle = "#81b64c";
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  ctx2.strokeStyle = "#81b64c";
+  ctx2.lineWidth = 2;
+  ctx2.stroke();
 }
 
 function renderAccuracyChart(perMove) {
   if (!accCanvas) return;
-  const ctx = accCanvas.getContext("2d");
+
+  const ctx2 = accCanvas.getContext("2d");
   const w = accCanvas.width;
   const h = accCanvas.height;
 
-  ctx.clearRect(0, 0, w, h);
-
+  ctx2.clearRect(0, 0, w, h);
   if (!perMove.length) return;
 
-  ctx.fillStyle = "#272522";
-  ctx.fillRect(0, 0, w, h);
+  ctx2.fillStyle = "#272522";
+  ctx2.fillRect(0, 0, w, h);
 
   const padding = 10;
   const barWidth = Math.max(2, (w - padding * 2) / perMove.length - 1);
@@ -795,12 +850,11 @@ function renderAccuracyChart(perMove) {
   for (let i = 0; i < perMove.length; i++) {
     const m = perMove[i];
     const x = padding + i * (barWidth + 1);
-    const barH = (m.accuracy / 100) * (h - padding * 2);
+    const barH = ((m.accuracy || 0) / 100) * (h - padding * 2);
     const y = h - padding - barH;
 
-    // Color based on move type
-    ctx.fillStyle = TAG_COLORS[m.tag] || "#97af8b";
-    ctx.fillRect(x, y, barWidth, barH);
+    ctx2.fillStyle = TAG_COLORS[m.tag] || "#97af8b";
+    ctx2.fillRect(x, y, barWidth, barH);
   }
 }
 
@@ -808,10 +862,17 @@ function renderAccuracyChart(perMove) {
    MOVES LIST
    ============================================================ */
 
+function formatEval(info) {
+  if (!info) return "";
+  if (info.type === "mate") return `M${Math.abs(info.value)}`;
+  const pawns = (info.value / 100).toFixed(1);
+  return info.value >= 0 ? `+${pawns}` : pawns;
+}
+
 function renderMovesList(analysis) {
   if (!movesList) return;
 
-  const h = analysis.headers;
+  const h = analysis.headers || {};
   if (movesTitle) {
     movesTitle.textContent = `${h.White || "White"} vs ${h.Black || "Black"}`;
   }
@@ -821,7 +882,7 @@ function renderMovesList(analysis) {
 
   movesList.innerHTML = "";
 
-  const perMove = analysis.perMove;
+  const perMove = analysis.perMove || [];
   for (let i = 0; i < perMove.length; i += 2) {
     const w = perMove[i];
     const b = perMove[i + 1];
@@ -838,8 +899,8 @@ function renderMovesList(analysis) {
             ? `
           <span class="move-san" data-ply="${w.ply}">${w.san}</span>
           <span class="move-tag ${w.tag}" title="${w.tag}">${
-                TAG_ICONS[w.tag] || ""
-              }</span>
+            TAG_ICONS[w.tag] || ""
+          }</span>
           <span class="move-eval">${formatEval(w.evalBefore)}</span>
         `
             : ""
@@ -851,8 +912,8 @@ function renderMovesList(analysis) {
             ? `
           <span class="move-san" data-ply="${b.ply}">${b.san}</span>
           <span class="move-tag ${b.tag}" title="${b.tag}">${
-                TAG_ICONS[b.tag] || ""
-              }</span>
+            TAG_ICONS[b.tag] || ""
+          }</span>
           <span class="move-eval">${formatEval(b.evalBefore)}</span>
         `
             : ""
@@ -860,7 +921,6 @@ function renderMovesList(analysis) {
       </div>
     `;
 
-    // Flash animation for mistakes/blunders
     if (w?.tag === "blunder" || w?.tag === "mistake") {
       setTimeout(() => row.classList.add(`flash-${w.tag}`), 50 + i * 30);
       setTimeout(() => row.classList.remove(`flash-${w.tag}`), 1500 + i * 30);
@@ -873,7 +933,6 @@ function renderMovesList(analysis) {
     movesList.appendChild(row);
   }
 
-  // Add click handlers
   movesList.querySelectorAll(".move-san").forEach((el) => {
     el.addEventListener("click", () => {
       const ply = parseInt(el.dataset.ply, 10);
@@ -882,18 +941,17 @@ function renderMovesList(analysis) {
   });
 }
 
-function formatEval(info) {
-  if (!info) return "";
-  if (info.type === "mate") {
-    return `M${Math.abs(info.value)}`;
-  }
-  const pawns = (info.value / 100).toFixed(1);
-  return info.value >= 0 ? `+${pawns}` : pawns;
-}
+/* ============================================================
+   PART 3/3 continues: Board rendering + listeners + PGN fetch
+   ============================================================ */
+// popup.js — DROP-IN FILE (PART 3/3)
+// Copy-paste this directly BELOW PART 2/3.
 
 /* ============================================================
-   BOARD RENDERING
+   BOARD RENDERING (evals are White POV everywhere)
    ============================================================ */
+
+const boardWrapper = $("#board-wrapper");
 
 const PIECE_IMAGES = {};
 const PIECE_KEYS = [
@@ -917,12 +975,13 @@ async function preloadPieces() {
       const img = new Image();
       img.onload = () => {
         PIECE_IMAGES[key] = img;
-        resolve();
+        resolve(true);
       };
-      img.onerror = () => resolve();
+      img.onerror = () => resolve(false);
       img.src = chrome.runtime.getURL(`pieces/${key}.png`);
     });
   });
+
   await Promise.all(promises);
 }
 
@@ -934,11 +993,14 @@ let flipped = false;
 let selectedPV = 1;
 
 function setupBoardCanvas() {
+  if (!boardCanvas) return;
   const dpr = window.devicePixelRatio || 1;
+
   boardCanvas.style.width = `${BOARD_SIZE}px`;
   boardCanvas.style.height = `${BOARD_SIZE}px`;
-  boardCanvas.width = BOARD_SIZE * dpr;
-  boardCanvas.height = BOARD_SIZE * dpr;
+  boardCanvas.width = Math.floor(BOARD_SIZE * dpr);
+  boardCanvas.height = Math.floor(BOARD_SIZE * dpr);
+
   ctx = boardCanvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
@@ -946,15 +1008,18 @@ function setupBoardCanvas() {
 function sqToXY(sq) {
   const file = "abcdefgh".indexOf(sq[0]);
   const rank = parseInt(sq[1], 10) - 1;
+
   const fx = flipped ? 7 - file : file;
   const fy = flipped ? rank : 7 - rank;
+
   return { x: fx * SQ_SIZE, y: fy * SQ_SIZE };
 }
 
 function drawBoard() {
+  if (!ctx) return;
+
   ctx.clearRect(0, 0, BOARD_SIZE, BOARD_SIZE);
 
-  // Draw squares
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
       const isLight = (r + f) % 2 === 0;
@@ -962,11 +1027,11 @@ function drawBoard() {
 
       const drawF = flipped ? 7 - f : f;
       const drawR = flipped ? r : 7 - r;
+
       ctx.fillRect(drawF * SQ_SIZE, drawR * SQ_SIZE, SQ_SIZE, SQ_SIZE);
     }
   }
 
-  // Draw coordinates
   renderCoords();
 }
 
@@ -978,7 +1043,6 @@ function renderCoords() {
   const ranks = flipped ? "12345678" : "87654321";
 
   for (let i = 0; i < 8; i++) {
-    // File labels (bottom)
     const fileEl = document.createElement("div");
     fileEl.className = `board-coord file ${i % 2 === 0 ? "dark" : "light"}`;
     fileEl.style.left = `${i * SQ_SIZE + SQ_SIZE - 8}px`;
@@ -986,7 +1050,6 @@ function renderCoords() {
     fileEl.textContent = files[i];
     boardCoords.appendChild(fileEl);
 
-    // Rank labels (right)
     const rankEl = document.createElement("div");
     rankEl.className = `board-coord rank ${i % 2 === 0 ? "light" : "dark"}`;
     rankEl.style.right = "4px";
@@ -997,6 +1060,8 @@ function renderCoords() {
 }
 
 function drawPieces(game) {
+  if (!ctx || !game) return;
+
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
       const sq = "abcdefgh"[f] + (8 - r);
@@ -1014,10 +1079,10 @@ function drawPieces(game) {
           x + padding,
           y + padding,
           SQ_SIZE - padding * 2,
-          SQ_SIZE - padding * 2
+          SQ_SIZE - padding * 2,
         );
       } else {
-        // Fallback circle
+        // fallback
         ctx.fillStyle = piece.color === "w" ? "#fff" : "#000";
         ctx.beginPath();
         ctx.arc(
@@ -1025,7 +1090,7 @@ function drawPieces(game) {
           y + SQ_SIZE / 2,
           SQ_SIZE * 0.35,
           0,
-          Math.PI * 2
+          Math.PI * 2,
         );
         ctx.fill();
         ctx.strokeStyle = piece.color === "w" ? "#000" : "#fff";
@@ -1037,6 +1102,7 @@ function drawPieces(game) {
 }
 
 function highlightSquares(squares, color) {
+  if (!ctx) return;
   ctx.fillStyle = color;
   for (const sq of squares) {
     const { x, y } = sqToXY(sq);
@@ -1045,6 +1111,8 @@ function highlightSquares(squares, color) {
 }
 
 function drawArrow(from, to, color) {
+  if (!ctx) return;
+
   const a = sqToXY(from);
   const b = sqToXY(to);
 
@@ -1060,6 +1128,7 @@ function drawArrow(from, to, color) {
 
   const ux = dx / len;
   const uy = dy / len;
+
   const headLen = SQ_SIZE * 0.3;
   const headWidth = SQ_SIZE * 0.2;
   const lineWidth = SQ_SIZE * 0.15;
@@ -1070,22 +1139,20 @@ function drawArrow(from, to, color) {
   ctx.lineWidth = lineWidth;
   ctx.lineCap = "round";
 
-  // Line
   ctx.beginPath();
   ctx.moveTo(x1 + ux * SQ_SIZE * 0.2, y1 + uy * SQ_SIZE * 0.2);
   ctx.lineTo(x2 - ux * headLen, y2 - uy * headLen);
   ctx.stroke();
 
-  // Arrowhead
   ctx.beginPath();
   ctx.moveTo(x2, y2);
   ctx.lineTo(
     x2 - ux * headLen - uy * headWidth,
-    y2 - uy * headLen + ux * headWidth
+    y2 - uy * headLen + ux * headWidth,
   );
   ctx.lineTo(
     x2 - ux * headLen + uy * headWidth,
-    y2 - uy * headLen - ux * headWidth
+    y2 - uy * headLen - ux * headWidth,
   );
   ctx.closePath();
   ctx.fill();
@@ -1093,26 +1160,23 @@ function drawArrow(from, to, color) {
   ctx.restore();
 }
 
-function updateEvalBar(info) {
+function updateEvalBar(infoWhite) {
   if (!evalBarWhite) return;
 
+  // infoWhite is White POV
   let winPercent = 50;
-  if (info) {
-    winPercent = evalToWinPercent(info);
-  }
+  if (infoWhite) winPercent = evalToWinPercent(infoWhite);
 
   // Clamp for display
   winPercent = Math.max(1, Math.min(99, winPercent));
-
   evalBarWhite.style.height = `${winPercent}%`;
 
-  // Update labels
   let evalText = "0.0";
-  if (info) {
-    if (info.type === "mate") {
-      evalText = `M${Math.abs(info.value)}`;
+  if (infoWhite) {
+    if (infoWhite.type === "mate") {
+      evalText = `M${Math.abs(infoWhite.value)}`;
     } else {
-      evalText = (Math.abs(info.value) / 100).toFixed(1);
+      evalText = (Math.abs(infoWhite.value) / 100).toFixed(1);
     }
   }
 
@@ -1124,123 +1188,6 @@ function updateEvalBar(info) {
     evalBottom.textContent = winPercent <= 50 ? evalText : "";
     evalBottom.style.color = "#fff";
   }
-}
-
-function gotoPly(ply) {
-  if (!boardAnalysis) return;
-
-  const perMove = boardAnalysis.perMove;
-  currentPly = Math.max(0, Math.min(ply, perMove.length));
-
-  // Rebuild position
-  const game = new Chess(boardAnalysis.startFen);
-  for (let i = 0; i < currentPly; i++) {
-    try {
-      game.move(perMove[i].san, { sloppy: true });
-    } catch (e) {}
-  }
-  boardGame = game;
-
-  // Clear overlay
-  if (boardOverlay) boardOverlay.innerHTML = "";
-
-  // Draw board
-  drawBoard();
-
-  // Highlight last move
-  if (currentPly > 0) {
-    const lastMove = perMove[currentPly - 1];
-    if (lastMove.from && lastMove.to) {
-      highlightSquares([lastMove.from, lastMove.to], COLORS.highlightLast);
-    }
-  }
-
-  // Redraw board and pieces
-  drawBoard();
-  if (currentPly > 0) {
-    const lastMove = perMove[currentPly - 1];
-    if (lastMove.from && lastMove.to) {
-      highlightSquares([lastMove.from, lastMove.to], COLORS.highlightLast);
-    }
-  }
-  drawPieces(game);
-
-  // Draw best move arrow
-  if (currentPly > 0) {
-    const node = perMove[currentPly - 1];
-    const pvData = node.pvLines?.[selectedPV];
-    if (pvData?.pv?.[0]) {
-      const uci = pvData.pv[0];
-      const from = uci.slice(0, 2);
-      const to = uci.slice(2, 4);
-      drawArrow(from, to, COLORS.arrowGreen);
-    }
-  }
-
-  // Update eval bar
-  if (currentPly > 0) {
-    const node = perMove[currentPly - 1];
-    updateEvalBar(node.evalBefore);
-  } else {
-    updateEvalBar(null);
-  }
-
-  // Update ply display
-  if (plyDisplay) {
-    plyDisplay.textContent = `${currentPly}/${perMove.length}`;
-  }
-
-  // Update position info
-  if (posFen) {
-    posFen.textContent = game.fen();
-  }
-
-  // Update best move display
-  if (currentPly > 0) {
-    const node = perMove[currentPly - 1];
-    const pvData = node.pvLines?.[selectedPV];
-
-    if (bestMoveSan && pvData?.pv?.[0]) {
-      const sanMove = uciToSan(node.fenBefore, pvData.pv[0]);
-      bestMoveSan.textContent = sanMove || pvData.pv[0];
-    } else if (bestMoveSan) {
-      bestMoveSan.textContent = "—";
-    }
-
-    if (pvLine && pvData?.pv) {
-      const sanList = pvToSanList(node.fenBefore, pvData.pv);
-      pvLine.textContent = `PV: ${sanList.join(" ")}`;
-    } else if (pvLine) {
-      pvLine.textContent = "PV: —";
-    }
-
-    if (evalDisplay && pvData) {
-      const evalStr = formatEval(pvData);
-      evalDisplay.textContent = evalStr;
-      evalDisplay.className = `eval-display ${
-        pvData.value >= 0 ? "positive" : "negative"
-      }`;
-    } else if (evalDisplay) {
-      evalDisplay.textContent = "—";
-    }
-  } else {
-    if (bestMoveSan) bestMoveSan.textContent = "—";
-    if (pvLine) pvLine.textContent = "PV: —";
-    if (evalDisplay) evalDisplay.textContent = "—";
-  }
-
-  // Update move badge
-  if (moveBadgeOverlay && currentPly > 0) {
-    const node = perMove[currentPly - 1];
-    moveBadgeOverlay.textContent = node.tag.toUpperCase();
-    moveBadgeOverlay.style.background = TAG_COLORS[node.tag] || "#666";
-    moveBadgeOverlay.style.display = "block";
-  } else if (moveBadgeOverlay) {
-    moveBadgeOverlay.style.display = "none";
-  }
-
-  // Update mini moves
-  renderMiniMoves();
 }
 
 function uciToSan(fen, uci) {
@@ -1260,10 +1207,12 @@ function uciToSan(fen, uci) {
 function pvToSanList(fen, pv) {
   const g = new Chess(fen);
   const sanList = [];
+
   for (const uci of pv || []) {
     const from = uci.slice(0, 2);
     const to = uci.slice(2, 4);
     const promotion = uci.slice(4) || undefined;
+
     try {
       const m = g.move({ from, to, promotion });
       if (!m) break;
@@ -1272,13 +1221,14 @@ function pvToSanList(fen, pv) {
       break;
     }
   }
+
   return sanList;
 }
 
 function renderMiniMoves() {
   if (!miniMoves || !boardAnalysis) return;
 
-  const perMove = boardAnalysis.perMove;
+  const perMove = boardAnalysis.perMove || [];
   let html = "";
 
   for (let i = 0; i < perMove.length; i += 2) {
@@ -1305,12 +1255,118 @@ function renderMiniMoves() {
 
   miniMoves.innerHTML = html;
 
-  // Add click handlers
   miniMoves.querySelectorAll(".mini-move-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       gotoPly(parseInt(btn.dataset.ply, 10));
     });
   });
+}
+
+function gotoPly(ply) {
+  if (!boardAnalysis) return;
+
+  const perMove = boardAnalysis.perMove || [];
+  currentPly = Math.max(0, Math.min(ply, perMove.length));
+
+  const game = new Chess(boardAnalysis.startFen);
+  for (let i = 0; i < currentPly; i++) {
+    try {
+      game.move(perMove[i].san, { sloppy: true });
+    } catch (e) {}
+  }
+  boardGame = game;
+
+  if (boardOverlay) boardOverlay.innerHTML = "";
+
+  drawBoard();
+
+  if (currentPly > 0) {
+    const lastMove = perMove[currentPly - 1];
+    if (lastMove.from && lastMove.to) {
+      highlightSquares([lastMove.from, lastMove.to], COLORS.highlightLast);
+    }
+  }
+
+  drawPieces(game);
+
+  // Best-move arrow from PV (green)
+  if (currentPly > 0) {
+    const node = perMove[currentPly - 1];
+    const pvData = node.pvLines?.[selectedPV];
+
+    if (pvData?.pv?.[0]) {
+      const uci = pvData.pv[0];
+      const from = uci.slice(0, 2);
+      const to = uci.slice(2, 4);
+      drawArrow(from, to, COLORS.arrowGreen);
+    }
+  }
+
+  // Eval bar uses White POV evalBefore
+  if (currentPly > 0) {
+    updateEvalBar(perMove[currentPly - 1].evalBefore);
+  } else {
+    updateEvalBar(null);
+  }
+
+  if (plyDisplay) {
+    plyDisplay.textContent = `${currentPly}/${perMove.length}`;
+  }
+
+  if (posFen) posFen.textContent = game.fen();
+
+  if (currentPly > 0) {
+    const node = perMove[currentPly - 1];
+    const pvData = node.pvLines?.[selectedPV];
+
+    if (bestMoveSan) {
+      if (pvData?.pv?.[0]) {
+        const sanMove = uciToSan(node.fenBefore, pvData.pv[0]);
+        bestMoveSan.textContent = sanMove || pvData.pv[0];
+      } else {
+        bestMoveSan.textContent = "—";
+      }
+    }
+
+    if (pvLine) {
+      if (pvData?.pv?.length) {
+        const sanList = pvToSanList(node.fenBefore, pvData.pv);
+        pvLine.textContent = `PV: ${sanList.join(" ")}`;
+      } else {
+        pvLine.textContent = "PV: —";
+      }
+    }
+
+    if (evalDisplay) {
+      if (pvData) {
+        evalDisplay.textContent = formatEval(pvData);
+        evalDisplay.className = `eval-display ${
+          pvData.value >= 0 ? "positive" : "negative"
+        }`;
+      } else {
+        evalDisplay.textContent = "—";
+        evalDisplay.className = "eval-display";
+      }
+    }
+  } else {
+    if (bestMoveSan) bestMoveSan.textContent = "—";
+    if (pvLine) pvLine.textContent = "PV: —";
+    if (evalDisplay) {
+      evalDisplay.textContent = "—";
+      evalDisplay.className = "eval-display";
+    }
+  }
+
+  if (moveBadgeOverlay && currentPly > 0) {
+    const node = perMove[currentPly - 1];
+    moveBadgeOverlay.textContent = String(node.tag || "").toUpperCase();
+    moveBadgeOverlay.style.background = TAG_COLORS[node.tag] || "#666";
+    moveBadgeOverlay.style.display = "block";
+  } else if (moveBadgeOverlay) {
+    moveBadgeOverlay.style.display = "none";
+  }
+
+  renderMiniMoves();
 }
 
 async function initBoard(analysis) {
@@ -1327,7 +1383,6 @@ async function initBoard(analysis) {
 function switchToBoard(ply = 0) {
   if (!lastAnalysis) return;
 
-  // Switch to board tab
   $$(".tab").forEach((t) => t.classList.remove("active"));
   $$(".panel").forEach((p) => {
     p.classList.remove("active");
@@ -1361,10 +1416,9 @@ $$(".tab").forEach((tab) => {
     $$(".panel").forEach((p) => {
       const isActive = p.id === `panel-${targetTab}`;
       p.classList.toggle("active", isActive);
-      p.setAttribute("aria-hidden", !isActive);
+      p.setAttribute("aria-hidden", String(!isActive));
     });
 
-    // Initialize board when switching to board tab
     if (targetTab === "board" && lastAnalysis) {
       initBoard(lastAnalysis);
     }
@@ -1432,10 +1486,11 @@ if (btnBoard) {
 if (btnFirst) btnFirst.addEventListener("click", () => gotoPly(0));
 if (btnPrev) btnPrev.addEventListener("click", () => gotoPly(currentPly - 1));
 if (btnNext) btnNext.addEventListener("click", () => gotoPly(currentPly + 1));
-if (btnLast)
-  btnLast.addEventListener("click", () =>
-    gotoPly(boardAnalysis?.perMove?.length || 0)
-  );
+if (btnLast) {
+  btnLast.addEventListener("click", () => {
+    gotoPly(boardAnalysis?.perMove?.length || 0);
+  });
+}
 
 // Back button
 if (btnBack) {
@@ -1448,7 +1503,7 @@ if (btnBack) {
 // Flip board
 if (flipBoard) {
   flipBoard.addEventListener("change", () => {
-    flipped = flipBoard.checked;
+    flipped = !!flipBoard.checked;
     gotoPly(currentPly);
   });
 }
@@ -1469,13 +1524,11 @@ $$(".filter-btn").forEach((btn) => {
     if (!boardAnalysis) return;
 
     const idx = boardAnalysis.perMove.findIndex((m) => m.tag === filter);
-    if (idx !== -1) {
-      gotoPly(idx + 1);
-    }
+    if (idx !== -1) gotoPly(idx + 1);
   });
 });
 
-// Keyboard navigation
+// Keyboard navigation (board panel only)
 document.addEventListener("keydown", (e) => {
   const boardPanel = $("#panel-board");
   if (!boardPanel?.classList.contains("active")) return;
@@ -1496,7 +1549,7 @@ document.addEventListener("keydown", (e) => {
     case "f":
       if (flipBoard) {
         flipBoard.checked = !flipBoard.checked;
-        flipped = flipBoard.checked;
+        flipped = !!flipBoard.checked;
         gotoPly(currentPly);
       }
       break;
@@ -1540,6 +1593,7 @@ async function ensureContentScript(tabId) {
 async function getGameContext() {
   const tabId = await getActiveTabId();
   await ensureContentScript(tabId);
+
   const res = await sendToTab(tabId, { type: "GET_GAME_CONTEXT" });
   if (!res?.ok) throw new Error(res?.error || "Failed to get game context");
   return res;
@@ -1547,8 +1601,9 @@ async function getGameContext() {
 
 async function fetchPgnFromApi(username, year, month) {
   const url = `${API_ORIGIN}/pgn?username=${encodeURIComponent(
-    username
+    username,
   )}&year=${year}&month=${month}`;
+
   const res = await fetch(url);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
@@ -1567,7 +1622,7 @@ async function loadPgnFromPage() {
       const game = games.find((g) => String(g.gameID) === String(meta.id));
       if (game?.PGN) return game.PGN;
     } catch (e) {
-      // Try next username
+      // try next username
     }
   }
 
@@ -1578,11 +1633,6 @@ async function loadPgnFromPage() {
    INITIALIZATION
    ============================================================ */
 
-// Initialize engine on load
 initEngine();
-
-// Cleanup on unload
 window.addEventListener("unload", shutdownEngine);
-
-// Set initial status
 setProgress("Ready", 0);
