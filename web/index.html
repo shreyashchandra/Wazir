@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Wazir — Local Chess Review</title>
+    <meta
+      name="description"
+      content="Wazir is a Chrome extension for reviewing finished chess.com games locally with Stockfish. Analyze accuracy, ACPL, move quality, charts, and board positions."
+    />
+
+    <style>
+      :root {
+        --bg: #181715;
+        --bg-soft: #24211f;
+        --card: #2f2b28;
+        --card-2: #38332f;
+        --text: #f5f5f5;
+        --muted: #bababa;
+        --green: #81b64c;
+        --green-dark: #6fa13e;
+        --gold: #f0c250;
+        --blue: #5c9ced;
+        --border: rgba(255, 255, 255, 0.08);
+        --shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+        --radius: 16px;
+        --max: 1100px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        font-family:
+          Inter,
+          Segoe UI,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        background:
+          radial-gradient(
+            circle at top,
+            rgba(129, 182, 76, 0.08),
+            transparent 35%
+          ),
+          linear-gradient(180deg, #1a1816 0%, #141311 100%);
+        color: var(--text);
+        line-height: 1.6;
+      }
+
+      a {
+        color: var(--blue);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      .container {
+        width: min(var(--max), calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        backdrop-filter: blur(10px);
+        background: rgba(24, 23, 21, 0.82);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .nav-inner {
+        width: min(var(--max), calc(100% - 32px));
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 0;
+        gap: 16px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-weight: 800;
+        letter-spacing: 0.3px;
+      }
+
+      .logo {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, var(--green), var(--green-dark));
+        color: #fff;
+        display: grid;
+        place-items: center;
+        font-size: 22px;
+        box-shadow: var(--shadow);
+      }
+
+      .brand small {
+        display: block;
+        color: var(--muted);
+        font-weight: 600;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+
+      .nav-links {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      .nav-links a {
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .nav-links a:hover {
+        color: var(--text);
+        text-decoration: none;
+      }
+
+      .hero {
+        padding: 72px 0 44px;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 28px;
+        align-items: center;
+      }
+
+      .eyebrow {
+        display: inline-block;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: rgba(129, 182, 76, 0.12);
+        color: #b9e48f;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.9px;
+      }
+
+      h1 {
+        margin: 16px 0 14px;
+        font-size: clamp(36px, 6vw, 58px);
+        line-height: 1.05;
+        letter-spacing: -1.5px;
+      }
+
+      .lead {
+        color: var(--muted);
+        font-size: 18px;
+        max-width: 650px;
+      }
+
+      .cta-row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 24px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 12px 18px;
+        border-radius: 12px;
+        font-weight: 700;
+        border: 1px solid transparent;
+        transition:
+          transform 0.15s ease,
+          background 0.15s ease,
+          border-color 0.15s ease;
+      }
+
+      .btn:hover {
+        transform: translateY(-1px);
+        text-decoration: none;
+      }
+
+      .btn-primary {
+        background: var(--green);
+        color: #fff;
+      }
+
+      .btn-primary:hover {
+        background: var(--green-dark);
+      }
+
+      .btn-secondary {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        border-color: var(--border);
+      }
+
+      .hero-card {
+        background: linear-gradient(180deg, var(--card), var(--bg-soft));
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        box-shadow: var(--shadow);
+        padding: 18px;
+      }
+
+      .mock-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 14px;
+      }
+
+      .mock-tabs {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+
+      .mock-tab {
+        padding: 10px 12px;
+        background: #1e1b19;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        text-align: center;
+        font-weight: 700;
+        color: var(--muted);
+      }
+
+      .mock-tab.active {
+        color: #fff;
+        border-color: rgba(129, 182, 76, 0.5);
+        box-shadow: inset 0 -3px 0 var(--green);
+      }
+
+      .mock-panels {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin-bottom: 14px;
+      }
+
+      .mini-card {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 14px;
+        padding: 14px;
+      }
+
+      .mini-card h3 {
+        margin: 0 0 8px;
+        font-size: 14px;
+      }
+
+      .score {
+        font-size: 34px;
+        font-weight: 800;
+        color: var(--gold);
+        margin: 8px 0;
+      }
+
+      .badge-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+
+      .badge {
+        background: #181614;
+        color: #fff;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        border: 1px solid var(--border);
+      }
+
+      .chart {
+        height: 100px;
+        border-radius: 14px;
+        background:
+          linear-gradient(180deg, rgba(129, 182, 76, 0.16), transparent),
+          #171513;
+        border: 1px solid var(--border);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .chart::before {
+        content: "";
+        position: absolute;
+        inset: 50% 10px auto 10px;
+        height: 1px;
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .chart svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      section {
+        padding: 26px 0;
+      }
+
+      .section-title {
+        font-size: 30px;
+        margin: 0 0 10px;
+        letter-spacing: -0.7px;
+      }
+
+      .section-lead {
+        color: var(--muted);
+        margin: 0 0 22px;
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 18px;
+      }
+
+      .feature-card,
+      .info-card,
+      .privacy-card {
+        background: linear-gradient(180deg, var(--card), var(--bg-soft));
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+      }
+
+      .feature-card {
+        padding: 20px;
+      }
+
+      .feature-icon {
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        border-radius: 12px;
+        background: rgba(129, 182, 76, 0.12);
+        color: #b9e48f;
+        font-size: 22px;
+        margin-bottom: 14px;
+      }
+
+      .feature-card h3,
+      .info-card h3 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+
+      .feature-card p,
+      .info-card p,
+      .privacy-card p,
+      .privacy-card li {
+        color: var(--muted);
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+      }
+
+      .step {
+        background: linear-gradient(180deg, var(--card), var(--bg-soft));
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px;
+      }
+
+      .step-num {
+        width: 32px;
+        height: 32px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        background: var(--green);
+        color: #fff;
+        font-weight: 800;
+        margin-bottom: 12px;
+      }
+
+      .info-wrap {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .info-card {
+        padding: 22px;
+      }
+
+      .privacy-card {
+        padding: 28px;
+      }
+
+      .privacy-card h2 {
+        margin-top: 0;
+        font-size: 30px;
+      }
+
+      .privacy-card h3 {
+        margin-top: 26px;
+        margin-bottom: 8px;
+        font-size: 18px;
+      }
+
+      .privacy-card ul {
+        padding-left: 20px;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .footer {
+        padding: 28px 0 40px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .footer-line {
+        border-top: 1px solid var(--border);
+        padding-top: 22px;
+      }
+
+      code.inline {
+        background: rgba(255, 255, 255, 0.06);
+        padding: 2px 6px;
+        border-radius: 6px;
+        color: #fff;
+      }
+
+      @media (max-width: 960px) {
+        .hero-grid,
+        .info-wrap,
+        .grid-3,
+        .steps {
+          grid-template-columns: 1fr;
+        }
+
+        .mock-panels {
+          grid-template-columns: 1fr;
+        }
+
+        .nav-inner {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .hero {
+          padding-top: 48px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="nav-inner">
+        <div class="brand">
+          <div class="logo">♟</div>
+          <div>
+            Wazir
+            <small>Local Chess Review</small>
+          </div>
+        </div>
+
+        <nav class="nav-links">
+          <a href="#features">Features</a>
+          <a href="#how-it-works">How it works</a>
+          <a href="#support">Support</a>
+          <a href="#privacy">Privacy</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="container hero-grid">
+          <div>
+            <span class="eyebrow">Chrome Extension</span>
+            <h1>Review finished chess.com games locally with Stockfish.</h1>
+            <p class="lead">
+              Wazir helps you analyze completed chess.com games with move
+              quality, accuracy, ACPL, charts, and interactive board review —
+              all inside a clean, fast extension experience.
+            </p>
+
+            <div class="cta-row">
+              <a
+                class="btn btn-primary"
+                href="https://github.com/shreyashchandra"
+                target="_blank"
+                >View project</a
+              >
+              <a class="btn btn-secondary" href="#privacy"
+                >Read privacy policy</a
+              >
+            </div>
+
+            <p class="muted" style="margin-top: 16px">
+              Wazir is an independent tool and is not affiliated with or
+              endorsed by Chess.com.
+            </p>
+          </div>
+
+          <div class="hero-card" aria-label="Wazir preview">
+            <div class="mock-header">
+              <span>WAZIR — GAME REVIEW</span>
+              <span>Opening: Sicilian Defense</span>
+            </div>
+
+            <div class="mock-tabs">
+              <div class="mock-tab active">Summary</div>
+              <div class="mock-tab">Move List</div>
+              <div class="mock-tab">Board</div>
+            </div>
+
+            <div class="mock-panels">
+              <div class="mini-card">
+                <h3>White</h3>
+                <div class="score">91.2%</div>
+                <div class="muted">ACPL: 24</div>
+                <div class="badge-row">
+                  <span class="badge">★ 14 Best</span>
+                  <span class="badge">✓ 6 Excellent</span>
+                  <span class="badge">? 1 Mistake</span>
+                </div>
+              </div>
+
+              <div class="mini-card">
+                <h3>Black</h3>
+                <div class="score">84.7%</div>
+                <div class="muted">ACPL: 58</div>
+                <div class="badge-row">
+                  <span class="badge">★ 9 Best</span>
+                  <span class="badge">?! 2 Inaccuracies</span>
+                  <span class="badge">?? 1 Blunder</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="chart">
+              <svg viewBox="0 0 600 100" preserveAspectRatio="none">
+                <polyline
+                  fill="none"
+                  stroke="#81b64c"
+                  stroke-width="3"
+                  points="10,55 60,58 110,48 160,54 210,46 260,52 310,44 360,50 410,42 460,66 510,34 590,62"
+                />
+              </svg>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="features">
+        <div class="container">
+          <h2 class="section-title">Features</h2>
+          <p class="section-lead">
+            Built for quick, useful post-game review without the bloat.
+          </p>
+
+          <div class="grid-3">
+            <article class="feature-card">
+              <div class="feature-icon">♟</div>
+              <h3>PGN fetch from supported game pages</h3>
+              <p>
+                Open a finished chess.com game, click Wazir, and fetch the game
+                PGN for analysis.
+              </p>
+            </article>
+
+            <article class="feature-card">
+              <div class="feature-icon">📊</div>
+              <h3>Accuracy, ACPL, and move quality</h3>
+              <p>
+                Review performance with per-player accuracy, average centipawn
+                loss, and move classifications.
+              </p>
+            </article>
+
+            <article class="feature-card">
+              <div class="feature-icon">🧠</div>
+              <h3>Local Stockfish analysis</h3>
+              <p>
+                Analyze games using a bundled Stockfish engine running inside
+                the extension.
+              </p>
+            </article>
+
+            <article class="feature-card">
+              <div class="feature-icon">📈</div>
+              <h3>Advantage and accuracy charts</h3>
+              <p>
+                Track evaluation swings and move-by-move performance throughout
+                the game.
+              </p>
+            </article>
+
+            <article class="feature-card">
+              <div class="feature-icon">🧭</div>
+              <h3>Interactive board review</h3>
+              <p>
+                Jump through moves, inspect critical positions, and view best
+                lines and suggested continuations.
+              </p>
+            </article>
+
+            <article class="feature-card">
+              <div class="feature-icon">⚡</div>
+              <h3>Fast focused workflow</h3>
+              <p>
+                Designed for one thing: reviewing finished games with a clean,
+                practical UI.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="how-it-works">
+        <div class="container">
+          <h2 class="section-title">How it works</h2>
+          <p class="section-lead">Four clicks, one game, no drama. Mostly.</p>
+
+          <div class="steps">
+            <div class="step">
+              <div class="step-num">1</div>
+              <h3>Open a finished game</h3>
+              <p>Go to a supported chess.com game or analysis page.</p>
+            </div>
+
+            <div class="step">
+              <div class="step-num">2</div>
+              <h3>Open Wazir</h3>
+              <p>Click the extension icon from the Chrome toolbar.</p>
+            </div>
+
+            <div class="step">
+              <div class="step-num">3</div>
+              <h3>Get PGN</h3>
+              <p>Fetch the PGN for the currently open game.</p>
+            </div>
+
+            <div class="step">
+              <div class="step-num">4</div>
+              <h3>Analyze</h3>
+              <p>Run local Stockfish review and inspect the results.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="support">
+        <div class="container">
+          <h2 class="section-title">Support</h2>
+          <p class="section-lead">
+            If something breaks, it is either a bug or a very creative opening.
+          </p>
+
+          <div class="info-wrap">
+            <div class="info-card">
+              <h3>Project links</h3>
+              <p>
+                Homepage:
+                <a href="https://github.com/shreyashchandra" target="_blank"
+                  >https://github.com/shreyashchandra</a
+                >
+              </p>
+              <p>
+                Support:
+                <a
+                  href="https://github.com/shreyashchandra/Wazir/issues"
+                  target="_blank"
+                  >https://github.com/shreyashchandra/Wazir/issues</a
+                >
+              </p>
+            </div>
+
+            <div class="info-card">
+              <h3>Contact</h3>
+              <p>
+                Support email:
+                <a href="mailto:shreyash.chandra123@gmail.com"
+                  >shreyash.chandra123@gmail.com</a
+                >
+              </p>
+              <p>For privacy or support questions, contact the email above.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="privacy">
+        <div class="container">
+          <article class="privacy-card">
+            <h2>Privacy Policy for Wazir</h2>
+            <p><strong>Effective date:</strong> March 17, 2026</p>
+
+            <p>
+              Wazir is a Chrome extension that helps users analyze finished
+              chess.com games using local Stockfish analysis.
+            </p>
+
+            <h3>1. Information Wazir may access</h3>
+            <p>
+              On supported chess.com game pages, Wazir may access limited
+              website content required for its core functionality, including:
+            </p>
+            <ul>
+              <li>Game ID</li>
+              <li>Game type or page context</li>
+              <li>Chess.com usernames visible on the game page</li>
+              <li>PGN-related metadata needed to identify the selected game</li>
+              <li>PGN text provided by the user or retrieved for analysis</li>
+            </ul>
+
+            <h3>2. How this information is used</h3>
+            <p>Wazir uses this information only to:</p>
+            <ul>
+              <li>Identify the currently open finished chess.com game</li>
+              <li>Retrieve the correct PGN for that game</li>
+              <li>Run game analysis inside the extension</li>
+              <li>
+                Display move classifications, accuracy, ACPL, charts, and board
+                review
+              </li>
+            </ul>
+
+            <h3>3. Local analysis</h3>
+            <p>
+              Wazir runs Stockfish analysis locally inside the extension using
+              packaged extension resources. Wazir does not download or execute
+              remote JavaScript or remote WebAssembly as part of its analysis
+              functionality.
+            </p>
+
+            <h3>4. Data sharing</h3>
+            <p>
+              Wazir does not sell personal data. Wazir does not use user data
+              for advertising. Wazir does not use or transfer user data for
+              creditworthiness, lending decisions, or unrelated profiling.
+            </p>
+
+            <p>
+              If PGN retrieval is performed through a Wazir-operated API, Wazir
+              may send the minimum information required to locate the selected
+              game PGN, such as username, game ID, and archive lookup context.
+              This is used only for the extension’s core functionality.
+            </p>
+
+            <h3>5. Data storage</h3>
+            <p>
+              Wazir does not permanently store analyzed game data on external
+              servers unless explicitly stated otherwise. Temporary processing
+              may occur as needed to return PGN data for the selected game.
+            </p>
+
+            <h3>6. User choices</h3>
+            <p>
+              Users choose when to open the extension, fetch a PGN, and run an
+              analysis. Wazir is intended for user-initiated review of finished
+              chess games.
+            </p>
+
+            <h3>7. Third-party services</h3>
+            <p>Wazir may communicate with:</p>
+            <ul>
+              <li>chess.com pages selected by the user</li>
+              <li>public or Wazir-operated PGN retrieval endpoints</li>
+            </ul>
+
+            <h3>8. Children’s privacy</h3>
+            <p>
+              Wazir is not directed to children under 13 and does not knowingly
+              collect personal information from children.
+            </p>
+
+            <h3>9. Changes to this policy</h3>
+            <p>
+              This privacy policy may be updated from time to time. Any changes
+              will be reflected on this page.
+            </p>
+
+            <h3>10. Contact</h3>
+            <p>
+              For support or privacy questions, contact:
+              <a href="mailto:shreyash.chandra123@gmail.com"
+                >shreyash.chandra123@gmail.com</a
+              >
+            </p>
+
+            <h3>11. Non-affiliation notice</h3>
+            <p>
+              Wazir is an independent project and is not affiliated with,
+              endorsed by, or sponsored by Chess.com.
+            </p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-line">
+        <p>
+          © 2026 Wazir. Built for finished game review with local Stockfish
+          analysis.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
