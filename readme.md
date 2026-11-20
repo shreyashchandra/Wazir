@@ -12,6 +12,9 @@ move tags, charts, a move list, and an interactive board replay with PV lines.
 
 > Not affiliated with Chess.com.
 
+**Website:** [`web/`](web/README.md) is the companion site: Stockfish 19 game review, stats & progress for any
+chess.com username, and a monthly / yearly Chess Wrapped. It runs entirely in the browser.
+
 ---
 
 ## Table of Contents

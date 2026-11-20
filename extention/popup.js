@@ -991,6 +991,9 @@ let boardGame = null;
 let currentPly = 0;
 let flipped = false;
 let selectedPV = 1;
+let selectedSquare = null;
+let isCustomMode = false;
+let customFen = null;
 
 function setupBoardCanvas() {
   if (!boardCanvas) return;
@@ -1003,6 +1006,10 @@ function setupBoardCanvas() {
 
   ctx = boardCanvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Add click listener
+  boardCanvas.removeEventListener("mousedown", handleBoardClick);
+  boardCanvas.addEventListener("mousedown", handleBoardClick);
 }
 
 function sqToXY(sq) {
@@ -1276,6 +1283,11 @@ function gotoPly(ply) {
   }
   boardGame = game;
 
+  // Reset interactive state
+  isCustomMode = false;
+  selectedSquare = null;
+  customFen = null;
+
   if (boardOverlay) boardOverlay.innerHTML = "";
 
   drawBoard();
@@ -1369,6 +1381,145 @@ function gotoPly(ply) {
   renderMiniMoves();
 }
 
+function xyToSq(x, y) {
+  const file = Math.floor(x / SQ_SIZE);
+  const rank = Math.floor(y / SQ_SIZE);
+
+  const fx = flipped ? 7 - file : file;
+  const fy = flipped ? rank : 7 - rank;
+
+  if (fx < 0 || fx > 7 || fy < 0 || fy > 7) return null;
+  return "abcdefgh"[fx] + (8 - fy);
+}
+
+async function handleBoardClick(e) {
+  if (!boardGame) return;
+
+  const rect = boardCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const sq = xyToSq(x, y);
+  if (!sq) return;
+
+  if (selectedSquare) {
+    if (selectedSquare === sq) {
+      selectedSquare = null;
+      redrawCurrentState();
+      return;
+    }
+
+    // Try move
+    try {
+      const testGame = new Chess(boardGame.fen());
+      const move = testGame.move({
+        from: selectedSquare,
+        to: sq,
+        promotion: "q",
+      });
+
+      if (move) {
+        boardGame.move({ from: selectedSquare, to: sq, promotion: "q" });
+        selectedSquare = null;
+        isCustomMode = true;
+        customFen = boardGame.fen();
+
+        redrawCurrentState();
+        await analyzeCustomPosition();
+      } else {
+        const piece = boardGame.get(sq);
+        if (piece && piece.color === boardGame.turn()) {
+          selectedSquare = sq;
+        } else {
+          selectedSquare = null;
+        }
+      }
+    } catch (err) {
+      selectedSquare = null;
+    }
+  } else {
+    const piece = boardGame.get(sq);
+    if (piece && piece.color === boardGame.turn()) {
+      selectedSquare = sq;
+    }
+  }
+
+  redrawCurrentState();
+}
+
+function redrawCurrentState() {
+  drawBoard();
+
+  if (selectedSquare) {
+    highlightSquares([selectedSquare], "rgba(255, 255, 0, 0.4)");
+
+    // Draw legal move dots
+    const moves = boardGame.moves({ square: selectedSquare, verbose: true });
+    for (const m of moves) {
+      const { x, y } = sqToXY(m.to);
+      ctx.beginPath();
+      ctx.arc(x + SQ_SIZE / 2, y + SQ_SIZE / 2, SQ_SIZE * 0.15, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
+      ctx.fill();
+    }
+  }
+
+  drawPieces(boardGame);
+}
+
+async function analyzeCustomPosition() {
+  if (!boardGame) return;
+  const fen = boardGame.fen();
+  const stm = boardGame.turn();
+
+  if (posFen) posFen.textContent = fen;
+  if (bestMoveSan) bestMoveSan.textContent = "...";
+  if (pvLine) pvLine.textContent = "Analyzing...";
+
+  const results = await analyzePosition(fen, { depth: 24, movetime: 500 }, 3);
+  if (results.length > 0 && isCustomMode && customFen === boardGame.fen()) {
+    const bestInfoRoot = results[0];
+    const bestInfoWhite = evalFromWhitePov(bestInfoRoot, stm);
+    updateEvalBar(bestInfoWhite);
+
+    if (bestMoveSan) {
+      const sanMove = uciToSan(fen, results[0].pv[0]);
+      bestMoveSan.textContent = sanMove || results[0].pv[0];
+    }
+
+    if (pvLine) {
+      const sanList = pvToSanList(fen, results[0].pv.slice(0, 5));
+      pvLine.textContent = `Best: ${sanList.join(" ")}`;
+    }
+
+    if (evalDisplay) {
+      evalDisplay.textContent = formatEval(bestInfoRoot);
+      evalDisplay.className = `eval-display ${
+        bestInfoRoot.value >= 0 ? "positive" : "negative"
+      }`;
+    }
+
+    // Draw arrow for best move
+    redrawCurrentState();
+    const uci = results[0].pv[0];
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    drawArrow(from, to, COLORS.arrowGreen);
+  }
+}
+
+function updateMoveBadge(node) {
+  if (!moveBadgeOverlay) return;
+
+  if (node && node.tag) {
+    moveBadgeOverlay.textContent = String(node.tag || "").toUpperCase();
+    moveBadgeOverlay.style.background = TAG_COLORS[node.tag] || "#666";
+    moveBadgeOverlay.style.display = "block";
+  } else {
+    moveBadgeOverlay.style.display = "none";
+  }
+}
+
 async function initBoard(analysis) {
   boardAnalysis = analysis;
   currentPly = 0;
@@ -1460,8 +1611,8 @@ if (btnAnalyze) {
       }
 
       const opts = {
-        depth: parseInt(depthEl?.value || "20", 10),
-        movetime: parseInt(msEl?.value || "100", 10),
+        depth: parseInt(depthEl?.value || "24", 10),
+        movetime: parseInt(msEl?.value || "500", 10),
         multipv: parseInt(mpvEl?.value || "3", 10),
       };
 
@@ -1635,4 +1786,14 @@ async function loadPgnFromPage() {
 
 initEngine();
 window.addEventListener("unload", shutdownEngine);
+
+window.__wazir = {
+  initBoard,
+  buildBoardFromSummary: initBoard, // alias for UI
+  lastSummaryGetter: () => lastAnalysis,
+  parseHeadersFromPgn: (pgn) => parseHeaders(pgn),
+  switchToBoard,
+  gotoPly,
+};
+
 setProgress("Ready", 0);
