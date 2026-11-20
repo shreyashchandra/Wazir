@@ -9,7 +9,7 @@ export interface EngineLike {
   newGame(): Promise<void>;
   search(fen: string, opts: SearchOptions): SearchHandle;
 }
-import { gameAccuracy, moveAccuracy, scoreToCp, scoreToWin, toWhitePov, whiteWin } from "./accuracy";
+import { gameAccuracy, moveAccuracyCp, scoreToCp, scoreToWin, toWhitePov } from "./accuracy";
 import { classify, isSacrifice, type Classification } from "./classify";
 import { isBookPosition, openingAt } from "./openings";
 import { extractClocks, extractSanMoves, parseHeaders } from "./pgn";
@@ -147,7 +147,7 @@ export function parseGame(pgn: string): ParsedGame {
 }
 
 export function reviewCacheKey(gameKey: string, preset: PresetId, engine: string) {
-  return `review:v1:${gameKey}:${preset}:${engine}`;
+  return `review:v2:${gameKey}:${preset}:${engine}`;
 }
 
 export async function loadCachedReview(gameKey: string, preset: PresetId, engine: string) {
@@ -236,10 +236,9 @@ export async function analyzeGame(
     let playedWin = 100 - scoreToWin(after);
     if (isTop) playedWin = Math.max(playedWin, bestWin); // same move, remove search noise
     const winLoss = Math.max(0, bestWin - playedWin);
-    const accuracy = isTop ? 100 : moveAccuracy(bestWin, playedWin);
-
     const cpBefore = Math.max(-1000, Math.min(1000, scoreToCp(before)));
     const cpAfter = Math.max(-1000, Math.min(1000, -scoreToCp(after)));
+    const accuracy = isTop ? 100 : moveAccuracyCp(cpBefore, cpAfter);
     const cpLoss = isTop ? 0 : Math.max(0, cpBefore - cpAfter);
 
     const prev = review.moves[k - 1];
@@ -293,8 +292,9 @@ export async function analyzeGame(
 
   const summarize = () => {
     const done = review.moves;
-    const whiteWins = [whiteWin(posScore[0]!, stm(0)), ...done.map((_m, i) => whiteWin(posScore[i + 1]!, stm(i + 1)))];
-    const acc = gameAccuracy(whiteWins, done.map((m) => m.accuracy), stm(0));
+    const whiteCp = (k: number) => scoreToCp(toWhitePov(posScore[k]!, stm(k)));
+    const whiteCps = [whiteCp(0), ...done.map((_m, i) => whiteCp(i + 1))];
+    const acc = gameAccuracy(whiteCps, done.map((m) => m.accuracy), stm(0));
     for (const color of ["w", "b"] as const) {
       const mine = done.filter((m) => m.color === color);
       const s = color === "w" ? review.white : review.black;

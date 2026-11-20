@@ -49,7 +49,38 @@ export function whiteWin(score: Score, sideToMove: "w" | "b"): number {
   return sideToMove === "w" ? w : 100 - w;
 }
 
-/** Per-move accuracy from the mover's win% before and after (lichess constants + 1pt uncertainty bonus). */
+/**
+ * Accuracy-model constants, fitted against chess.com's own published Game
+ * Review accuracies (56 games, players rated ~200 to 3000; see
+ * tests/collect.test.ts). Held-out mean absolute error: 4.1 points, versus 7.4
+ * for the stock lichess constants. The fitted model is a harmonic mean of
+ * per-move accuracies with each move floored at ~25, so one blunder in a short
+ * game no longer drags the score toward zero, which matches chess.com.
+ * These only drive the accuracy number; eval bar / classification keep cpToWin.
+ */
+export const ACC_MODEL = {
+  slope: 0.0015625,
+  decay: 0.1124375,
+  bonus: 0.484375,
+  /** Share of the volatility-weighted mean (rest is harmonic mean). */
+  blend: 0,
+  floor: 24.75,
+};
+
+function accWin(cp: number): number {
+  const c = Math.max(-1000, Math.min(1000, cp));
+  return 50 + 50 * (2 / (1 + Math.exp(-ACC_MODEL.slope * c)) - 1);
+}
+
+/** Per-move accuracy from the mover's centipawn eval before (best play) and after the move. */
+export function moveAccuracyCp(cpBefore: number, cpAfter: number): number {
+  const diff = accWin(cpBefore) - accWin(cpAfter);
+  if (diff <= 0) return 100;
+  const raw = 103.1668100711649 * Math.exp(-ACC_MODEL.decay * diff) - 3.166924740191411 + ACC_MODEL.bonus;
+  return Math.max(0, Math.min(100, raw));
+}
+
+/** Per-move accuracy from win% (stock lichess constants), kept for reference and tests. */
 export function moveAccuracy(winBefore: number, winAfter: number): number {
   if (winAfter >= winBefore) return 100;
   const diff = winBefore - winAfter;
@@ -64,17 +95,18 @@ function stdDev(xs: number[]): number {
 
 /**
  * Game accuracy per side.
- * @param whiteWins White's win% for every position, starting position first (length = plies + 1).
- * @param moveAccs  Accuracy of each ply (length = plies), mover POV.
+ * @param whiteCps White-POV centipawn eval of every position, start first (length = plies + 1).
+ * @param moveAccs Accuracy of each ply (length = plies), mover POV.
  * @param firstMover Who made ply 0.
  */
 export function gameAccuracy(
-  whiteWins: number[],
+  whiteCps: number[],
   moveAccs: number[],
   firstMover: "w" | "b" = "w",
 ): { white: number | null; black: number | null } {
   const n = moveAccs.length;
   if (n === 0) return { white: null, black: null };
+  const whiteWins = whiteCps.map(accWin);
   const windowSize = Math.max(2, Math.min(8, Math.floor(n / 10)));
   const windows: number[][] = [];
   const head = whiteWins.slice(0, windowSize);
@@ -96,13 +128,13 @@ export function gameAccuracy(
       const a = moveAccs[i];
       wSum += weights[i];
       wAcc += a * weights[i];
-      invSum += 1 / Math.max(a, 1);
+      invSum += 1 / Math.max(a, ACC_MODEL.floor);
       count++;
     }
     if (!count) return null;
     const weighted = wAcc / wSum;
     const harmonic = count / invSum;
-    return (weighted + harmonic) / 2;
+    return ACC_MODEL.blend * weighted + (1 - ACC_MODEL.blend) * harmonic;
   };
   return { white: side("w"), black: side("b") };
 }

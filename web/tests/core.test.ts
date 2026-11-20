@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cpToWin, gameAccuracy, moveAccuracy, toWhitePov, whiteWin } from "../src/lib/accuracy";
+import { cpToWin, gameAccuracy, moveAccuracy, moveAccuracyCp, toWhitePov, whiteWin } from "../src/lib/accuracy";
 import { classify, isSacrifice } from "../src/lib/classify";
 import { extractSanMoves, extractClocks, openingFromEcoUrl, parseHeaders } from "../src/lib/pgn";
 import { isBookPosition, openingAt } from "../src/lib/openings";
@@ -21,12 +21,17 @@ describe("accuracy model", () => {
     expect(whiteWin({ type: "mate", value: 0 }, "w")).toBe(0);
     expect(toWhitePov({ type: "mate", value: 3 }, "b")).toEqual({ type: "mate", value: -3 });
   });
-  it("game accuracy punishes a blunder more than the plain mean suggests", () => {
-    const wins = [50, 50, 50, 50, 50, 50, 50, 50, 50, 20, 20];
-    const accs = [100, 100, 100, 100, 100, 100, 100, 100, 30, 100];
-    const g = gameAccuracy(wins, accs, "w");
-    expect(g.white!).toBeLessThan(86);
+  it("game accuracy: one blunder hurts but doesn't zero a short game", () => {
+    const cps = [20, 20, 20, 20, 20, 20, 20, 20, 20, -400, -400];
+    const accs = [100, 100, 100, 100, 100, 100, 100, 100, moveAccuracyCp(20, -400), 100];
+    const g = gameAccuracy(cps, accs, "w");
+    expect(g.white!).toBeLessThan(90);
+    expect(g.white!).toBeGreaterThan(45);
     expect(g.black!).toBeCloseTo(100);
+  });
+  it("fitted per-move accuracy drops with eval loss", () => {
+    expect(moveAccuracyCp(50, 50)).toBe(100);
+    expect(moveAccuracyCp(50, 0)).toBeGreaterThan(moveAccuracyCp(50, -300));
   });
 });
 
