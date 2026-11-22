@@ -25,7 +25,14 @@ export function UserSearch({ big, placeholder = "chess.com username", autoFocus 
         style={big ? undefined : { width: 200, padding: "7px 12px" }}
       />
       <button className={big ? "btn btn-primary" : "btn btn-sm"} type="submit">
-        {big ? "Analyze my chess" : "Go"}
+        {big ? (
+          <>
+            <span className="lbl-long">Analyze my chess</span>
+            <span className="lbl-short">Analyze</span>
+          </>
+        ) : (
+          "Go"
+        )}
       </button>
     </form>
   );

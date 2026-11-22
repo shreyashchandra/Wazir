@@ -354,3 +354,53 @@ section.block { padding: 96px 0; border-top: 0; }
 .player-strip { font-family: var(--font-body); }
 .player-strip .clock { background: var(--surface-3); font-weight: 700; }
 .acc-big { font-family: var(--font-display); letter-spacing: -0.03em; }
+
+/* ---------- Mobile fixes (kept last so they win over the desktop rules above) ---------- */
+.user-search { width: 100%; box-sizing: border-box; }
+.user-search .input { flex: 1 1 auto; min-width: 0; width: auto; }
+.user-search .btn { flex: none; }
+.platform-pill { flex-wrap: wrap; row-gap: 6px; }
+
+@media (max-width: 900px) {
+  .hero-grid { grid-template-columns: minmax(0, 1fr); gap: 36px; }
+  .hero h1 { max-width: none; }
+  .fan { transform: none; width: 100%; max-width: 440px; height: 360px; margin: 0 auto; }
+  .fan .story-card { width: 46%; height: 320px; padding: 16px; border-radius: 18px; }
+  .fan .c1 { left: 0; top: 26px; }
+  .fan .c2 { left: 27%; top: 0; }
+  .fan .c3 { left: 54%; top: 30px; }
+  .fan .story-card .v { font-size: 2.3rem; }
+  .fan .story-card .s { font-size: .8rem; }
+}
+
+@media (max-width: 560px) {
+  .hero { padding: 40px 0 48px; }
+  .hero h1 { font-size: clamp(2.3rem, 11vw, 3rem); }
+  .hero .lead { font-size: 1.05rem; }
+  .user-search { margin-top: 24px; }
+  .user-search .input { padding: 10px 12px; font-size: 1rem; }
+  .user-search .btn { padding: 10px 16px; font-size: .95rem; }
+  .fan { height: 290px; }
+  .fan .story-card { height: 250px; padding: 14px; }
+  .fan .story-card .k { font-size: .62rem; letter-spacing: .12em; }
+  .fan .story-card .v { font-size: 1.9rem; }
+  .fan .story-card .s { font-size: .74rem; }
+  section.block { padding: 64px 0; }
+  .cta-band { padding: 72px 0; }
+  .nav-inner { gap: 8px; }
+  .nav-links { gap: 0; }
+  .nav-links a { padding: 6px 9px; }
+  .icon-btn { width: 34px; height: 34px; }
+}
+
+@media (max-width: 400px) {
+  .nav-links a { padding: 6px 7px; font-size: .84rem; }
+  .brand .logo { width: 30px; height: 30px; }
+  .user-search .btn { padding: 10px 14px; }
+}
+
+.lbl-short { display: none; }
+@media (max-width: 400px) {
+  .lbl-long { display: none; }
+  .lbl-short { display: inline; }
+}
