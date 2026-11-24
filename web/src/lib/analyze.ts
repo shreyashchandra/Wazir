@@ -17,12 +17,20 @@ import { cacheGet, cacheSet } from "./cache";
 
 export type PresetId = "fast" | "standard" | "deep" | "max";
 
+// Speed notes (8-core laptop, Stockfish 19 NNUE WASM, 7 threads): MultiPV 3 costs
+// 3-10x more than MultiPV 1, and time per position roughly triples every 2 plies
+// past depth 18. The accuracy model was calibrated at depth 16 / MultiPV 2, so
+// "standard" is both the validated setting and fast (~1-2 min per game).
+// movetime caps each position so one hard position can't stall the review.
 export const PRESETS: Record<PresetId, SearchOptions & { label: string; hint: string }> = {
-  fast: { label: "Fast", hint: "Depth 14", depth: 14, multipv: 2, movetime: 1500 },
-  standard: { label: "Standard", hint: "Depth 18", depth: 18, multipv: 3, movetime: 4000 },
-  deep: { label: "Deep", hint: "Depth 22", depth: 22, multipv: 3, movetime: 10000 },
-  max: { label: "Maximum", hint: "Depth 28", depth: 28, multipv: 3, movetime: 30000 },
+  fast: { label: "Quick", hint: "Depth 12", depth: 12, multipv: 2, movetime: 700 },
+  standard: { label: "Standard", hint: "Depth 16", depth: 16, multipv: 2, movetime: 2000 },
+  deep: { label: "Deep", hint: "Depth 20", depth: 20, multipv: 2, movetime: 5000 },
+  max: { label: "Maximum", hint: "Depth 24", depth: 24, multipv: 3, movetime: 15000 },
 };
+
+/** Opening-book positions only need a cheap eval (their moves are labelled Book anyway). */
+const BOOK_SEARCH: SearchOptions = { depth: 10, multipv: 1, movetime: 300 };
 
 export interface EngineLine {
   /** White POV. */
@@ -316,7 +324,8 @@ export async function analyzeGame(
     if (terminal) {
       posScore[k] = terminal;
     } else {
-      const lines = await engine.search(fens[k], opts).promise;
+      // Position k is "in book" when the move played from it is a book move.
+      const lines = await engine.search(fens[k], book[k] ? BOOK_SEARCH : opts).promise;
       if (cb.signal?.cancelled) break;
       posLines[k] = lines;
       posScore[k] = lines[0]?.score ?? { type: "cp", value: 0 };

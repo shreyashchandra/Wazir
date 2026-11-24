@@ -29,7 +29,12 @@ API directly (it sends `Access-Control-Allow-Origin: *`) and runs Stockfish 19 a
 
 - **Stockfish 19 full NNUE** (`stockfish` npm package), multi-threaded when the page is cross-origin isolated,
   single-threaded otherwise. A Lite build (~2 MB) is the default on phones and selectable in the Engine tab.
-- **Depth presets:** Fast 14 · Standard 18 · Deep 22 (default on desktop) · Maximum 28, all with MultiPV 3.
+- **Depth presets:** Quick 12 · **Standard 16 (default)** · Deep 20 · Maximum 24. The review pass uses MultiPV 2
+  (Maximum: 3) and caps each position's search time; opening-book positions get a quick depth-10 eval. The Engine tab
+  searches the viewed position live with 3 lines once the review is done.
+- **Speed:** Standard reviews a 102-ply game in ~2 minutes on an 8-core laptop (7 threads). Standard is also the
+  setting the accuracy model was calibrated at, so going deeper is slower without matching chess.com any better.
+  MultiPV 3 costs 3–10× more than MultiPV 1, and time per position roughly triples every 2 plies past depth 18.
 - Every position is searched once; a move's quality comes from the eval before it (best play) vs after it.
 - Finished reviews and completed months of chess.com games are cached in IndexedDB.
 
@@ -108,11 +113,22 @@ Screenshots in `docs/screenshots/` were taken against the dev server with headle
 
 The site is static (`dist/`), but it needs two things from the host:
 
-1. **Headers for multi-threading** (already in `public/_headers` for Cloudflare Pages / Netlify):
-   `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless`.
-   Without them the engine still works, just single-threaded (several times slower). Safari doesn't support
-   `credentialless` yet, so Safari users get the single-threaded engine.
-2. **SPA fallback** to `index.html` (`public/_redirects`).
+1. **Headers for multi-threading:** `Cross-Origin-Opener-Policy: same-origin` and
+   `Cross-Origin-Embedder-Policy: require-corp`. Without them the engine silently falls back to **1 thread**, several
+   times slower (the Engine tab shows "single-threaded" when this happens). Everything the site loads cross-origin
+   (chess.com avatars, Google Fonts) sends `Cross-Origin-Resource-Policy: cross-origin`, so `require-corp` is safe and
+   also works in Safari. If you add a new cross-origin image or script, check that it sends that header.
+2. **SPA fallback** to `index.html`, or deep links like `/review/...` and `/wrapped/...` return 404.
+
+Both are configured per host:
+
+| Host | File |
+| --- | --- |
+| **Vercel** (current production) | `vercel.json` |
+| Cloudflare Pages / Netlify | `public/_headers` and `public/_redirects` |
+
+Vercel ignores `_headers` / `_redirects`. Set the Vercel project's root directory to `web/` so it picks up
+`vercel.json`.
 
 **Large engine files:** `stockfish-19.wasm` and `stockfish-19-single.wasm` are ~99 MB each. Cloudflare Pages rejects
 files over 25 MiB, so on Pages upload `public/engine/*.wasm` to an R2 bucket (or any CDN) that serves them with

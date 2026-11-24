@@ -48,7 +48,8 @@ Details for developers are in [`web/README.md`](web/README.md).
 - **Move classifications**: Brilliant, Great, Best, Excellent, Good, Book, Forced, Inaccuracy, Mistake, Miss, Blunder
 - A plain-language explanation of every move, with the best alternative drawn on the board
 - Eval bar, clickable eval graph, accuracy per game phase, average centipawn loss
-- **Engine tab**: the top 3 lines at every position, a depth picker (14 / 18 / 22 / 28) and a full or lite engine
+- **Engine tab**: the top 3 lines for any position (searched live), a depth picker (12 / 16 / 20 / 24) and a full or lite engine
+- **Fast**: a typical 50-move game reviews in about 2 minutes on a laptop at the default (calibrated) depth
 - **Explore freely**: move pieces yourself and the engine follows your line live
 - **Board sounds** for moves, captures, castling, checks and mate, plus green (chess.com style) or wood boards
 

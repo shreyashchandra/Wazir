@@ -133,7 +133,7 @@ export function Home() {
                 </div>
               </div>
               <h3>Every game, reviewed</h3>
-              <p>Stockfish 19 NNUE at up to depth 28: accuracy, Brilliant to Blunder labels, best lines and an explorable board.</p>
+              <p>Stockfish 19 NNUE, about two minutes per game: accuracy, Brilliant to Blunder labels, best lines and an explorable board.</p>
             </Link>
             <Link className="feature-card" to="/stats">
               <div className="viz" style={{ padding: 18 }}>
@@ -176,7 +176,7 @@ export function Home() {
           </div>
           <div className="card stack">
             <div className="row"><b>Engine</b><span className="spacer" /><span className="muted">Stockfish 19 NNUE, multi-threaded</span></div>
-            <div className="row"><b>Depth</b><span className="spacer" /><span className="muted">14 / 18 / 22 / 28</span></div>
+            <div className="row"><b>Depth</b><span className="spacer" /><span className="muted">12 / 16 / 20 / 24</span></div>
             <div className="row"><b>Lines</b><span className="spacer" /><span className="muted">MultiPV 3 on every position</span></div>
             <div className="row"><b>Sounds</b><span className="spacer" /><span className="muted">Board sounds, toggle in the top bar</span></div>
             <div className="row"><b>Cost</b><span className="spacer" /><span className="muted">Free. Your device does the work.</span></div>

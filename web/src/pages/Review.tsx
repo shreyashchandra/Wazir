@@ -144,12 +144,13 @@ export function ReviewFromPgn() {
 
 function defaultPreset(): PresetId {
   try {
-    const p = localStorage.getItem("wazir:preset") as PresetId | null;
+    // v2 key: presets were retuned for speed, so older saved choices are reset once.
+    const p = localStorage.getItem("wazir:preset2") as PresetId | null;
     if (p && p in PRESETS) return p;
   } catch {
     /* ignore */
   }
-  return self.crossOriginIsolated ? "deep" : "standard";
+  return "standard";
 }
 
 interface Variation {
@@ -180,7 +181,7 @@ function ReviewGame({
   const [preset, setPreset] = useState<PresetId>(defaultPreset);
   const [flavor, setFlavor] = useState<EngineFlavor>(defaultFlavor);
   const [review, setReview] = useState<GameReview | null>(null);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; started: number } | null>(null);
   const [download, setDownload] = useState<number | null>(null);
   const [engineErr, setEngineErr] = useState<string | null>(null);
   const [engine, setEngine] = useState<StockfishEngine | null>(null);
@@ -219,12 +220,13 @@ function ReviewGame({
           setReview(cached);
           return;
         }
+        const started = performance.now();
         await analyzeGame(pgn, gameKey, eng, preset, {
           signal: sig,
           onProgress: (r, done, total) => {
             if (sig.cancelled) return;
             setReview(r);
-            setProgress({ done, total });
+            setProgress({ done, total, started });
             force((x) => x + 1);
           },
         });
@@ -296,6 +298,21 @@ function ReviewGame({
     const h = engine.search(varFen, { depth: PRESETS[preset].depth + 2, multipv: 3 }, (l) => setLiveLines(l));
     return () => h.cancel();
   }, [varFen, engine, preset, progress, review]);
+
+  // Engine tab: once the review is done, search the viewed position live with
+  // 3 lines (the review pass itself stores only 2, to keep it fast).
+  const [gameLines, setGameLines] = useState<{ fen: string; lines: PvLine[] } | null>(null);
+  const gameFen = !(parsed instanceof Error) && !variation && tab === "engine" && review?.complete && ply < total ? parsed.fens[ply] : null;
+  useEffect(() => {
+    if (!gameFen || !engine) {
+      setGameLines(null);
+      return;
+    }
+    const h = engine.search(gameFen, { depth: Math.max(22, PRESETS[preset].depth + 4), multipv: 3, movetime: 12000 }, (l) =>
+      setGameLines({ fen: gameFen, lines: l }),
+    );
+    return () => h.cancel();
+  }, [gameFen, engine, preset]);
 
   if (parsed instanceof Error) return <div className="container center-msg"><div className="error-box">{parsed.message}</div></div>;
 
@@ -376,6 +393,13 @@ function ReviewGame({
   };
 
   const pct = progress ? Math.round((progress.done / Math.max(1, progress.total)) * 100) : 100;
+  // Time left, extrapolated from the average time per position so far.
+  let eta = "";
+  if (progress && progress.done >= 3) {
+    const perPos = (performance.now() - progress.started) / progress.done;
+    const left = Math.round((perPos * (progress.total - progress.done)) / 1000);
+    eta = left < 60 ? `~${Math.max(1, left)}s left` : `~${Math.round(left / 60)} min left`;
+  }
 
   return (
     <div className="container review-grid">
@@ -439,7 +463,13 @@ function ReviewGame({
             <div className="stack" style={{ gap: 6 }}>
               <span className="small muted">
                 Analyzing move {Math.min(progress.done, progress.total)}/{progress.total} · {PRESETS[preset].label} ({PRESETS[preset].hint})
+                {eta && <> · {eta}</>}
               </span>
+              {engine && !engine.info.multiThreaded && (
+                <span className="small" style={{ color: "var(--gold)" }}>
+                  Running on 1 CPU core, so this is slow. Switch to Fast or Standard depth for a quicker review.
+                </span>
+              )}
               <div className="progress"><div style={{ width: `${pct}%` }} /></div>
             </div>
           )}
@@ -471,7 +501,7 @@ function ReviewGame({
                   {(Object.keys(PRESETS) as PresetId[]).map((p) => (
                     <button key={p} className={p === preset ? "on" : ""} onClick={() => {
                       setPreset(p);
-                      try { localStorage.setItem("wazir:preset", p); } catch { /* ignore */ }
+                      try { localStorage.setItem("wazir:preset2", p); } catch { /* ignore */ }
                     }}>
                       {PRESETS[p].label} <span className="muted">{PRESETS[p].hint}</span>
                     </button>
@@ -494,9 +524,16 @@ function ReviewGame({
               <div>
                 <h3 style={{ marginBottom: 8 }}>Best lines in this position</h3>
                 <div className="stack" style={{ gap: 6 }}>
-                  {(ply < total ? analyzed[ply]?.lines : undefined)?.map((l, i) => (
-                    <LineRow key={i} score={l.score} san={l.san} depth={l.depth} />
-                  )) ?? <span className="small muted">{ply >= total ? "Game over." : "Not analyzed yet."}</span>}
+                  {gameLines && gameLines.fen === fens[ply] && gameLines.lines.length > 0
+                    ? gameLines.lines.map((l) => (
+                        <LineRow key={l.multipv} score={toWhitePov(l.score, stmOf(fens[ply]))} san={uciLineToSan(fens[ply], l.pv)} depth={l.depth} />
+                      ))
+                    : (ply < total ? analyzed[ply]?.lines : undefined)?.map((l, i) => (
+                        <LineRow key={i} score={l.score} san={l.san} depth={l.depth} />
+                      )) ?? <span className="small muted">{ply >= total ? "Game over." : "Not analyzed yet."}</span>}
+                  {gameLines && gameLines.fen === fens[ply] && gameLines.lines[0] && (
+                    <span className="small muted">Live · depth {gameLines.lines[0].depth}</span>
+                  )}
                 </div>
               </div>
               <p className="small muted">Tip: click pieces on the board to explore your own ideas; the engine follows along live.</p>
