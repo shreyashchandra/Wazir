@@ -81,6 +81,18 @@ Then fit new constants and copy the printed `params` into `ACC_MODEL` (`s` → `
 node scripts/fit-accuracy.mjs /tmp/calib.0.json /tmp/calib.1.json /tmp/calib.2.json /tmp/calib.3.json
 ```
 
+## Shared with the Chrome extension
+
+The extension runs this same analysis code. `npm run build:extension` bundles `src/lib/extension-entry.ts`
+(engine wrapper, accuracy model, classification, opening book) into `../extention/lib/wazir-core.js` and copies
+Stockfish 19 Lite into `../extention/stockfish/`. Re-run it after changing anything in `src/lib`, so the website and
+the extension never drift apart.
+
+The extension uses the **Lite** engine (~1.7 MB): Chrome Web Store extensions must bundle their code, and the full
+build is ~99 MB. On the 56 calibration games Lite is just as close to chess.com (average gap 3.8 points vs 3.9 for
+the full engine). The manifest's `cross_origin_embedder_policy` / `cross_origin_opener_policy` keys make the popup
+cross-origin isolated, so Lite runs multi-threaded there too.
+
 ## Sound and music
 
 - **Board sounds** (`src/lib/sound.ts`): move, capture, castle, check, promotion, game end and illegal-move sounds,

@@ -1144,3 +1144,13 @@ body {
     --board-size: 400px;
   }
 }
+
+/* Labels added with the shared analysis core (same colors as the website) */
+.move-badge[data-type="miss"] .icon,
+.move-tag.miss {
+  background: #ee6b55;
+}
+.move-badge[data-type="forced"] .icon,
+.move-tag.forced {
+  background: #8f8f8f;
+}

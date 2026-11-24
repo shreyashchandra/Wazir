@@ -35,7 +35,8 @@ export interface SearchHandle {
   cancel: () => void;
 }
 
-const WASM_BASE = (import.meta.env.VITE_ENGINE_WASM_BASE as string | undefined)?.trim() || "";
+// import.meta.env is undefined in the extension bundle, hence the optional chaining.
+const WASM_BASE = (import.meta.env?.VITE_ENGINE_WASM_BASE as string | undefined)?.trim() || "";
 
 export function isMobileDevice() {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -126,12 +127,16 @@ export class StockfishEngine {
   static async create(
     flavor: EngineFlavor,
     onDownload?: (fraction: number) => void,
+    /** Where the engine .js/.wasm files live (the extension passes chrome.runtime.getURL("stockfish/")). */
+    location_: { scriptBase?: string; wasmBase?: string } = {},
   ): Promise<StockfishEngine> {
     const multiThreaded = typeof SharedArrayBuffer !== "undefined" && self.crossOriginIsolated === true;
     const base = flavor === "full" ? "stockfish-19" : "stockfish-19-lite";
     const file = multiThreaded ? base : `${base}-single`;
-    const wasmUrl = (WASM_BASE || `${location.origin}/engine/`) + `${file}.wasm`;
-    const worker = new Worker(`/engine/${file}.js#${encodeURIComponent(wasmUrl)}`);
+    const scriptBase = location_.scriptBase ?? "/engine/";
+    const wasmBase = location_.wasmBase ?? (WASM_BASE || new URL(scriptBase, location.href).href);
+    const wasmUrl = wasmBase + `${file}.wasm`;
+    const worker = new Worker(`${scriptBase}${file}.js#${encodeURIComponent(wasmUrl)}`);
 
     const cores = navigator.hardwareConcurrency || 4;
     const threads = multiThreaded ? Math.max(1, Math.min(cores - 1, 32)) : 1;

@@ -1,0 +1,2592 @@
+function e(e) {
+	if (!e.startsWith("info ") || !e.includes(" pv ") || !e.includes(" score ") || e.includes(" lowerbound") || e.includes(" upperbound")) return null;
+	let t = e.split(" "), n = {
+		multipv: 1,
+		depth: 0,
+		score: {
+			type: "cp",
+			value: 0
+		},
+		pv: []
+	};
+	for (let e = 1; e < t.length; e++) switch (t[e]) {
+		case "depth":
+			n.depth = Number(t[++e]);
+			break;
+		case "seldepth":
+			n.seldepth = Number(t[++e]);
+			break;
+		case "multipv":
+			n.multipv = Number(t[++e]);
+			break;
+		case "nodes":
+			n.nodes = Number(t[++e]);
+			break;
+		case "nps":
+			n.nps = Number(t[++e]);
+			break;
+		case "score":
+			n.score = {
+				type: t[++e] === "mate" ? "mate" : "cp",
+				value: Number(t[++e])
+			};
+			break;
+		case "pv": n.pv = t.slice(e + 1), e = t.length;
+	}
+	return n.pv.length ? n : null;
+}
+var t = class t {
+	worker;
+	listeners = /* @__PURE__ */ new Set();
+	queue = [];
+	running = null;
+	currentMultiPv = 1;
+	info;
+	constructor(e, t) {
+		this.worker = e, this.info = t, e.onmessage = (e) => {
+			if (typeof e.data == "string") for (let t of this.listeners) t(e.data);
+		};
+	}
+	static async create(e, n, r = {}) {
+		let i = typeof SharedArrayBuffer < "u" && self.crossOriginIsolated === !0, a = e === "full" ? "stockfish-19" : "stockfish-19-lite", o = i ? a : `${a}-single`, s = r.scriptBase ?? "/engine/", c = (r.wasmBase ?? new URL(s, location.href).href) + `${o}.wasm`, l = new Worker(`${s}${o}.js#${encodeURIComponent(c)}`), u = navigator.hardwareConcurrency || 4, d = i ? Math.max(1, Math.min(u - 1, 32)) : 1, f = navigator.deviceMemory ?? 8, p = e === "lite" || f < 4 ? 64 : f >= 8 ? 512 : 256, m = new t(l, {
+			name: e === "full" ? "Stockfish 19 NNUE" : "Stockfish 19 Lite",
+			flavor: e,
+			threads: d,
+			hashMb: p,
+			multiThreaded: i
+		});
+		return l.addEventListener("message", (e) => {
+			e.data && typeof e.data == "object" && typeof e.data.percent == "number" && n?.(e.data.percent);
+		}), await new Promise((e, t) => {
+			let n = setTimeout(() => t(/* @__PURE__ */ Error("Engine took too long to start")), 18e4);
+			l.onerror = (e) => {
+				clearTimeout(n), t(/* @__PURE__ */ Error(`Engine failed to load: ${e.message || "worker error"}`));
+			}, m.waitFor("uciok").then(() => {
+				clearTimeout(n), e();
+			}), m.send("uci");
+		}), m.send(`setoption name Threads value ${d}`), m.send(`setoption name Hash value ${p}`), m.send("setoption name MultiPV value 1"), await m.ready(), n?.(1), m;
+	}
+	send(e) {
+		this.worker.postMessage(e);
+	}
+	waitFor(e) {
+		return new Promise((t) => {
+			let n = (r) => {
+				r.startsWith(e) && (this.listeners.delete(n), t(r));
+			};
+			this.listeners.add(n);
+		});
+	}
+	async ready() {
+		let e = this.waitFor("readyok");
+		this.send("isready"), await e;
+	}
+	async newGame() {
+		await this.stopAll(), this.send("ucinewgame"), await this.ready();
+	}
+	search(e, t, n) {
+		let r, i = new Promise((i, a) => {
+			r = {
+				fen: e,
+				opts: t,
+				onUpdate: n,
+				resolve: i,
+				reject: a,
+				cancelled: !1
+			};
+		});
+		return this.queue.push(r), this.pump(), {
+			promise: i,
+			cancel: () => {
+				r.cancelled = !0, this.running === r && this.send("stop");
+			}
+		};
+	}
+	async stopAll() {
+		for (let e of this.queue) e.cancelled = !0, e.resolve([]);
+		if (this.queue = [], this.running) {
+			let e = this.waitFor("bestmove");
+			this.send("stop"), await e;
+		}
+	}
+	async pump() {
+		if (this.running) return;
+		let e = this.queue.shift();
+		if (e) {
+			if (e.cancelled) e.resolve([]), this.pump();
+			else {
+				this.running = e;
+				try {
+					e.resolve(await this.run(e));
+				} catch (t) {
+					e.reject(t);
+				} finally {
+					this.running = null, this.pump();
+				}
+			}
+		}
+	}
+	async run(t) {
+		let { fen: n, opts: r } = t;
+		r.multipv !== this.currentMultiPv && (this.send(`setoption name MultiPV value ${r.multipv}`), this.currentMultiPv = r.multipv, await this.ready());
+		let i = /* @__PURE__ */ new Map(), a = 0, o = new Promise((n) => {
+			let r = (o) => {
+				if (o.startsWith("bestmove")) {
+					this.listeners.delete(r), n();
+					return;
+				}
+				let c = e(o);
+				c && (i.set(c.multipv, c), t.onUpdate && c.multipv === 1 && performance.now() - a > 120 && (a = performance.now(), t.onUpdate(s())));
+			};
+			this.listeners.add(r);
+		}), s = () => {
+			let e = [...i.values()].sort((e, t) => e.multipv - t.multipv), t = e[0]?.depth ?? 0;
+			return e.filter((e) => e.multipv === 1 || e.depth >= t - 1);
+		};
+		this.send(`position fen ${n}`), this.send(`go depth ${r.depth}${r.movetime ? ` movetime ${r.movetime}` : ""}`), await o;
+		let c = s();
+		return t.onUpdate?.(c), c;
+	}
+	terminate() {
+		this.worker.terminate(), this.listeners.clear();
+	}
+};
+// node_modules/chess.js/dist/esm/chess.js
+function n(e) {
+	return e === null ? { variations: [] } : {
+		comment: e,
+		variations: []
+	};
+}
+function r(e, t, n, r, i) {
+	let a = {
+		move: e,
+		variations: i
+	};
+	return t && (a.suffix = t), n && (a.nag = n), r !== null && (a.comment = r), a;
+}
+function i(...e) {
+	let [t, ...n] = e, r = t;
+	for (let e of n) e !== null && (r.variations = [e, ...e.variations], e.variations = [], r = e);
+	return t;
+}
+function a(e, t) {
+	if (t.marker && t.marker.comment) {
+		let e = t.root;
+		for (;;) {
+			let n = e.variations[0];
+			if (!n) {
+				e.comment = t.marker.comment;
+				break;
+			}
+			e = n;
+		}
+	}
+	return {
+		headers: e,
+		root: t.root,
+		result: (t.marker && t.marker.result) ?? void 0
+	};
+}
+function o(e, t) {
+	function n() {
+		this.constructor = e;
+	}
+	n.prototype = t.prototype, e.prototype = new n();
+}
+function s(e, t, n, r) {
+	var i = Error.call(this, e);
+	return Object.setPrototypeOf && Object.setPrototypeOf(i, s.prototype), i.expected = t, i.found = n, i.location = r, i.name = "SyntaxError", i;
+}
+o(s, Error);
+function c(e, t, n) {
+	return n ||= " ", e.length > t ? e : (t -= e.length, n += n.repeat(t), e + n.slice(0, t));
+}
+s.prototype.format = function(e) {
+	var t = "Error: " + this.message;
+	if (this.location) {
+		for (var n = null, r = 0; r < e.length; r++) if (e[r].source === this.location.source) {
+			n = e[r].text.split(/\r\n|\n|\r/g);
+			break;
+		}
+		var i = this.location.start, a = this.location.source && typeof this.location.source.offset == "function" ? this.location.source.offset(i) : i, o = this.location.source + ":" + a.line + ":" + a.column;
+		if (n) {
+			var s = this.location.end, l = c("", a.line.toString().length, " "), u = n[i.line - 1], d = (i.line === s.line ? s.column : u.length + 1) - i.column || 1;
+			t += "\n --> " + o + "\n" + l + " |\n" + a.line + " | " + u + "\n" + l + " | " + c("", i.column - 1, " ") + c("", d, "^");
+		} else t += "\n at " + o;
+	}
+	return t;
+}, s.buildMessage = function(e, t) {
+	var n = {
+		literal: function(e) {
+			return "\"" + i(e.text) + "\"";
+		},
+		class: function(e) {
+			var t = e.parts.map(function(e) {
+				return Array.isArray(e) ? a(e[0]) + "-" + a(e[1]) : a(e);
+			});
+			return "[" + (e.inverted ? "^" : "") + t.join("") + "]";
+		},
+		any: function() {
+			return "any character";
+		},
+		end: function() {
+			return "end of input";
+		},
+		other: function(e) {
+			return e.description;
+		}
+	};
+	function r(e) {
+		return e.charCodeAt(0).toString(16).toUpperCase();
+	}
+	function i(e) {
+		return e.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\0/g, "\\0").replace(/\t/g, "\\t").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/[\x00-\x0F]/g, function(e) {
+			return "\\x0" + r(e);
+		}).replace(/[\x10-\x1F\x7F-\x9F]/g, function(e) {
+			return "\\x" + r(e);
+		});
+	}
+	function a(e) {
+		return e.replace(/\\/g, "\\\\").replace(/\]/g, "\\]").replace(/\^/g, "\\^").replace(/-/g, "\\-").replace(/\0/g, "\\0").replace(/\t/g, "\\t").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/[\x00-\x0F]/g, function(e) {
+			return "\\x0" + r(e);
+		}).replace(/[\x10-\x1F\x7F-\x9F]/g, function(e) {
+			return "\\x" + r(e);
+		});
+	}
+	function o(e) {
+		return n[e.type](e);
+	}
+	function s(e) {
+		var t = e.map(o), n, r;
+		if (t.sort(), t.length > 0) {
+			for (n = 1, r = 1; n < t.length; n++) t[n - 1] !== t[n] && (t[r] = t[n], r++);
+			t.length = r;
+		}
+		switch (t.length) {
+			case 1: return t[0];
+			case 2: return t[0] + " or " + t[1];
+			default: return t.slice(0, -1).join(", ") + ", or " + t[t.length - 1];
+		}
+	}
+	function c(e) {
+		return e ? "\"" + i(e) + "\"" : "end of input";
+	}
+	return "Expected " + s(e) + " but " + c(t) + " found.";
+};
+function l(e, t) {
+	t = t === void 0 ? {} : t;
+	var o = {}, c = t.grammarSource, l = { pgn: Ze }, u = Ze, d = "[", f = "\"", p = "]", m = ".", h = "O-O-O", g = "O-O", _ = "0-0-0", v = "0-0", y = "$", b = "{", x = "}", S = ";", C = "(", ee = ")", te = "1-0", w = "0-1", T = "1/2-1/2", E = "*", D = /^[a-zA-Z]/, ne = /^[^"]/, O = /^[0-9]/, re = /^[.]/, ie = /^[a-zA-Z1-8\-=]/, ae = /^[+#]/, oe = /^[!?]/, se = /^[^}]/, ce = /^[^\r\n]/, le = /^[ \t\r\n]/, k = Z("tag pair"), A = Y("[", !1), ue = Y("\"", !1), de = Y("]", !1), j = Z("tag name"), M = X([["a", "z"], ["A", "Z"]], !1, !1), fe = Z("tag value"), N = X(["\""], !0, !1), P = Z("move number"), F = X([["0", "9"]], !1, !1), pe = Y(".", !1), I = X(["."], !1, !1), me = Z("standard algebraic notation"), he = Y("O-O-O", !1), L = Y("O-O", !1), R = Y("0-0-0", !1), ge = Y("0-0", !1), _e = X([
+		["a", "z"],
+		["A", "Z"],
+		["1", "8"],
+		"-",
+		"="
+	], !1, !1), ve = X(["+", "#"], !1, !1), z = Z("suffix annotation"), B = X(["!", "?"], !1, !1), ye = Z("NAG"), be = Y("$", !1), xe = Z("brace comment"), Se = Y("{", !1), Ce = X(["}"], !0, !1), we = Y("}", !1), V = Z("rest of line comment"), Te = Y(";", !1), Ee = X(["\r", "\n"], !0, !1), De = Z("variation"), Oe = Y("(", !1), ke = Y(")", !1), Ae = Z("game termination marker"), je = Y("1-0", !1), Me = Y("0-1", !1), Ne = Y("1/2-1/2", !1), Pe = Y("*", !1), Fe = Z("whitespace"), Ie = X([
+		" ",
+		"	",
+		"\r",
+		"\n"
+	], !1, !1), Le = function(e, t) {
+		return a(e, t);
+	}, Re = function(e) {
+		return Object.fromEntries(e);
+	}, ze = function(e, t) {
+		return [e, t];
+	}, Be = function(e, t) {
+		return {
+			root: e,
+			marker: t
+		};
+	}, Ve = function(e, t) {
+		return i(n(e), ...t.flat());
+	}, He = function(e, t, n, i, a) {
+		return r(e, t, n, i, a);
+	}, Ue = function(e) {
+		return e;
+	}, We = function(e) {
+		return e.replace(/[\r\n]+/g, " ");
+	}, Ge = function(e) {
+		return e.trim();
+	}, H = function(e) {
+		return e;
+	}, Ke = function(e, t) {
+		return {
+			result: e,
+			comment: t
+		};
+	}, U = t.peg$currPos | 0, W = [{
+		line: 1,
+		column: 1
+	}], G = U, K = t.peg$maxFailExpected || [], q = t.peg$silentFails | 0, J;
+	if (t.startRule) {
+		if (!(t.startRule in l)) throw Error("Can't start parsing from rule \"" + t.startRule + "\".");
+		u = l[t.startRule];
+	}
+	function Y(e, t) {
+		return {
+			type: "literal",
+			text: e,
+			ignoreCase: t
+		};
+	}
+	function X(e, t, n) {
+		return {
+			type: "class",
+			parts: e,
+			inverted: t,
+			ignoreCase: n
+		};
+	}
+	function qe() {
+		return { type: "end" };
+	}
+	function Z(e) {
+		return {
+			type: "other",
+			description: e
+		};
+	}
+	function Je(t) {
+		var n = W[t], r;
+		if (n) return n;
+		if (t >= W.length) r = W.length - 1;
+		else for (r = t; !W[--r];);
+		for (n = W[r], n = {
+			line: n.line,
+			column: n.column
+		}; r < t;) e.charCodeAt(r) === 10 ? (n.line++, n.column = 1) : n.column++, r++;
+		return W[t] = n, n;
+	}
+	function Ye(e, t, n) {
+		var r = Je(e), i = Je(t);
+		return {
+			source: c,
+			start: {
+				offset: e,
+				line: r.line,
+				column: r.column
+			},
+			end: {
+				offset: t,
+				line: i.line,
+				column: i.column
+			}
+		};
+	}
+	function Q(e) {
+		U < G || (U > G && (G = U, K = []), K.push(e));
+	}
+	function Xe(e, t, n) {
+		return new s(s.buildMessage(e, t), e, t, n);
+	}
+	function Ze() {
+		var e = U;
+		return e = Le(Qe(), nt()), e;
+	}
+	function Qe() {
+		for (var e = U, t = [], n = $e(); n !== o;) t.push(n), n = $e();
+		return n = $(), e = Re(t), e;
+	}
+	function $e() {
+		var t, n, r, i, a, s, c;
+		return q++, t = U, $(), e.charCodeAt(U) === 91 ? (n = d, U++) : (n = o, q === 0 && Q(A)), n === o ? (U = t, t = o) : ($(), r = et(), r === o ? (U = t, t = o) : ($(), e.charCodeAt(U) === 34 ? (i = f, U++) : (i = o, q === 0 && Q(ue)), i === o ? (U = t, t = o) : (a = tt(), e.charCodeAt(U) === 34 ? (s = f, U++) : (s = o, q === 0 && Q(ue)), s === o ? (U = t, t = o) : ($(), e.charCodeAt(U) === 93 ? (c = p, U++) : (c = o, q === 0 && Q(de)), c === o ? (U = t, t = o) : t = ze(r, a))))), q--, t === o && q === 0 && Q(k), t;
+	}
+	function et() {
+		var t, n, r;
+		if (q++, t = U, n = [], r = e.charAt(U), D.test(r) ? U++ : (r = o, q === 0 && Q(M)), r !== o) for (; r !== o;) n.push(r), r = e.charAt(U), D.test(r) ? U++ : (r = o, q === 0 && Q(M));
+		else n = o;
+		return t = n === o ? n : e.substring(t, U), q--, t === o && (n = o, q === 0 && Q(j)), t;
+	}
+	function tt() {
+		var t, n, r;
+		for (q++, t = U, n = [], r = e.charAt(U), ne.test(r) ? U++ : (r = o, q === 0 && Q(N)); r !== o;) n.push(r), r = e.charAt(U), ne.test(r) ? U++ : (r = o, q === 0 && Q(N));
+		return t = e.substring(t, U), q--, n = o, q === 0 && Q(fe), t;
+	}
+	function nt() {
+		var e = U, t = rt(), n;
+		return $(), n = pt(), n === o && (n = null), $(), e = Be(t, n), e;
+	}
+	function rt() {
+		var e = U, t = lt(), n, r;
+		for (t === o && (t = null), n = [], r = it(); r !== o;) n.push(r), r = it();
+		return e = Ve(t, n), e;
+	}
+	function it() {
+		var e = U, t, n, r, i, a, s, c;
+		if ($(), at(), $(), t = ot(), t !== o) {
+			for (n = st(), n === o && (n = null), r = [], i = ct(); i !== o;) r.push(i), i = ct();
+			for (i = $(), a = lt(), a === o && (a = null), s = [], c = ft(); c !== o;) s.push(c), c = ft();
+			e = He(t, n, r, a, s);
+		} else U = e, e = o;
+		return e;
+	}
+	function at() {
+		var t, n, r, i, a, s;
+		for (q++, t = U, n = [], r = e.charAt(U), O.test(r) ? U++ : (r = o, q === 0 && Q(F)); r !== o;) n.push(r), r = e.charAt(U), O.test(r) ? U++ : (r = o, q === 0 && Q(F));
+		if (e.charCodeAt(U) === 46 ? (r = m, U++) : (r = o, q === 0 && Q(pe)), r !== o) {
+			for (i = $(), a = [], s = e.charAt(U), re.test(s) ? U++ : (s = o, q === 0 && Q(I)); s !== o;) a.push(s), s = e.charAt(U), re.test(s) ? U++ : (s = o, q === 0 && Q(I));
+			n = [
+				n,
+				r,
+				i,
+				a
+			], t = n;
+		} else U = t, t = o;
+		return q--, t === o && (n = o, q === 0 && Q(P)), t;
+	}
+	function ot() {
+		var t, n, r, i, a, s;
+		if (q++, t = U, n = U, e.substr(U, 5) === h ? (r = h, U += 5) : (r = o, q === 0 && Q(he)), r === o && (e.substr(U, 3) === g ? (r = g, U += 3) : (r = o, q === 0 && Q(L)), r === o && (e.substr(U, 5) === _ ? (r = _, U += 5) : (r = o, q === 0 && Q(R)), r === o && (e.substr(U, 3) === v ? (r = v, U += 3) : (r = o, q === 0 && Q(ge)), r === o)))) {
+			if (r = U, i = e.charAt(U), D.test(i) ? U++ : (i = o, q === 0 && Q(M)), i !== o) {
+				if (a = [], s = e.charAt(U), ie.test(s) ? U++ : (s = o, q === 0 && Q(_e)), s !== o) for (; s !== o;) a.push(s), s = e.charAt(U), ie.test(s) ? U++ : (s = o, q === 0 && Q(_e));
+				else a = o;
+				a === o ? (U = r, r = o) : (i = [i, a], r = i);
+			} else U = r, r = o;
+		}
+		return r === o ? (U = n, n = o) : (i = e.charAt(U), ae.test(i) ? U++ : (i = o, q === 0 && Q(ve)), i === o && (i = null), r = [r, i], n = r), t = n === o ? n : e.substring(t, U), q--, t === o && (n = o, q === 0 && Q(me)), t;
+	}
+	function st() {
+		var t, n, r;
+		for (q++, t = U, n = [], r = e.charAt(U), oe.test(r) ? U++ : (r = o, q === 0 && Q(B)); r !== o;) n.push(r), n.length >= 2 ? r = o : (r = e.charAt(U), oe.test(r) ? U++ : (r = o, q === 0 && Q(B)));
+		return n.length < 1 ? (U = t, t = o) : t = n, q--, t === o && (n = o, q === 0 && Q(z)), t;
+	}
+	function ct() {
+		var t, n, r, i, a;
+		if (q++, t = U, $(), e.charCodeAt(U) === 36 ? (n = y, U++) : (n = o, q === 0 && Q(be)), n !== o) {
+			if (r = U, i = [], a = e.charAt(U), O.test(a) ? U++ : (a = o, q === 0 && Q(F)), a !== o) for (; a !== o;) i.push(a), a = e.charAt(U), O.test(a) ? U++ : (a = o, q === 0 && Q(F));
+			else i = o;
+			r = i === o ? i : e.substring(r, U), r === o ? (U = t, t = o) : t = Ue(r);
+		} else U = t, t = o;
+		return q--, t === o && q === 0 && Q(ye), t;
+	}
+	function lt() {
+		var e = ut();
+		return e === o && (e = dt()), e;
+	}
+	function ut() {
+		var t, n, r, i, a;
+		if (q++, t = U, e.charCodeAt(U) === 123 ? (n = b, U++) : (n = o, q === 0 && Q(Se)), n !== o) {
+			for (r = U, i = [], a = e.charAt(U), se.test(a) ? U++ : (a = o, q === 0 && Q(Ce)); a !== o;) i.push(a), a = e.charAt(U), se.test(a) ? U++ : (a = o, q === 0 && Q(Ce));
+			r = e.substring(r, U), e.charCodeAt(U) === 125 ? (i = x, U++) : (i = o, q === 0 && Q(we)), i === o ? (U = t, t = o) : t = We(r);
+		} else U = t, t = o;
+		return q--, t === o && (n = o, q === 0 && Q(xe)), t;
+	}
+	function dt() {
+		var t, n, r, i, a;
+		if (q++, t = U, e.charCodeAt(U) === 59 ? (n = S, U++) : (n = o, q === 0 && Q(Te)), n !== o) {
+			for (r = U, i = [], a = e.charAt(U), ce.test(a) ? U++ : (a = o, q === 0 && Q(Ee)); a !== o;) i.push(a), a = e.charAt(U), ce.test(a) ? U++ : (a = o, q === 0 && Q(Ee));
+			r = e.substring(r, U), t = Ge(r);
+		} else U = t, t = o;
+		return q--, t === o && (n = o, q === 0 && Q(V)), t;
+	}
+	function ft() {
+		var t, n, r, i;
+		return q++, t = U, $(), e.charCodeAt(U) === 40 ? (n = C, U++) : (n = o, q === 0 && Q(Oe)), n === o ? (U = t, t = o) : (r = rt(), r === o ? (U = t, t = o) : ($(), e.charCodeAt(U) === 41 ? (i = ee, U++) : (i = o, q === 0 && Q(ke)), i === o ? (U = t, t = o) : t = H(r))), q--, t === o && q === 0 && Q(De), t;
+	}
+	function pt() {
+		var t, n, r;
+		return q++, t = U, e.substr(U, 3) === te ? (n = te, U += 3) : (n = o, q === 0 && Q(je)), n === o && (e.substr(U, 3) === w ? (n = w, U += 3) : (n = o, q === 0 && Q(Me)), n === o && (e.substr(U, 7) === T ? (n = T, U += 7) : (n = o, q === 0 && Q(Ne)), n === o && (e.charCodeAt(U) === 42 ? (n = E, U++) : (n = o, q === 0 && Q(Pe))))), n === o ? (U = t, t = o) : ($(), r = lt(), r === o && (r = null), t = Ke(n, r)), q--, t === o && (n = o, q === 0 && Q(Ae)), t;
+	}
+	function $() {
+		var t, n;
+		for (q++, t = [], n = e.charAt(U), le.test(n) ? U++ : (n = o, q === 0 && Q(Ie)); n !== o;) t.push(n), n = e.charAt(U), le.test(n) ? U++ : (n = o, q === 0 && Q(Ie));
+		return q--, n = o, q === 0 && Q(Fe), t;
+	}
+	if (J = u(), t.peg$library) return {
+		peg$result: J,
+		peg$currPos: U,
+		peg$FAILED: o,
+		peg$maxFailExpected: K,
+		peg$maxFailPos: G
+	};
+	if (J !== o && U === e.length) return J;
+	throw J !== o && U < e.length && Q(qe()), Xe(K, G < e.length ? e.charAt(G) : null, G < e.length ? Ye(G, G + 1) : Ye(G, G));
+}
+var u = 18446744073709551615n;
+function d(e, t) {
+	return (e << t | e >> 64n - t) & 18446744073709551615n;
+}
+function f(e, t) {
+	return e * t & u;
+}
+function p(e) {
+	return function() {
+		let t = BigInt(e & u), n = BigInt(e >> 64n & u), r = f(d(f(t, 5n), 7n), 9n);
+		return n ^= t, t = (d(t, 24n) ^ n ^ n << 16n) & u, n = d(n, 37n), e = n << 64n | t, r;
+	};
+}
+var m = p(214711438343225530594246349426526445598n), h = Array.from({ length: 2 }, () => Array.from({ length: 6 }, () => Array.from({ length: 128 }, () => m()))), g = Array.from({ length: 8 }, () => m()), _ = Array.from({ length: 16 }, () => m()), v = m(), y = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", b = class {
+	color;
+	from;
+	to;
+	piece;
+	captured;
+	promotion;
+	flags;
+	san;
+	lan;
+	before;
+	after;
+	constructor(e, t) {
+		let { color: n, piece: r, from: i, to: a, flags: o, captured: s, promotion: c } = t, l = N(i), u = N(a);
+		this.color = n, this.piece = r, this.from = l, this.to = u, this.san = e._moveToSan(t, e._moves({ legal: !0 })), this.lan = l + u, this.before = e.fen(), e._makeMove(t), this.after = e.fen(), e._undoMove(), this.flags = "";
+		for (let e in C) C[e] & o && (this.flags += S[e]);
+		s && (this.captured = s), c && (this.promotion = c, this.lan += c);
+	}
+	isCapture() {
+		return this.flags.indexOf(S.CAPTURE) > -1;
+	}
+	isPromotion() {
+		return this.flags.indexOf(S.PROMOTION) > -1;
+	}
+	isEnPassant() {
+		return this.flags.indexOf(S.EP_CAPTURE) > -1;
+	}
+	isKingsideCastle() {
+		return this.flags.indexOf(S.KSIDE_CASTLE) > -1;
+	}
+	isQueensideCastle() {
+		return this.flags.indexOf(S.QSIDE_CASTLE) > -1;
+	}
+	isBigPawn() {
+		return this.flags.indexOf(S.BIG_PAWN) > -1;
+	}
+}, x = -1, S = {
+	NORMAL: "n",
+	CAPTURE: "c",
+	BIG_PAWN: "b",
+	EP_CAPTURE: "e",
+	PROMOTION: "p",
+	KSIDE_CASTLE: "k",
+	QSIDE_CASTLE: "q",
+	NULL_MOVE: "-"
+}, C = {
+	NORMAL: 1,
+	CAPTURE: 2,
+	BIG_PAWN: 4,
+	EP_CAPTURE: 8,
+	PROMOTION: 16,
+	KSIDE_CASTLE: 32,
+	QSIDE_CASTLE: 64,
+	NULL_MOVE: 128
+}, ee = {
+	Event: "?",
+	Site: "?",
+	Date: "????.??.??",
+	Round: "?",
+	White: "?",
+	Black: "?",
+	Result: "*"
+}, te = {
+	WhiteTitle: null,
+	BlackTitle: null,
+	WhiteElo: null,
+	BlackElo: null,
+	WhiteUSCF: null,
+	BlackUSCF: null,
+	WhiteNA: null,
+	BlackNA: null,
+	WhiteType: null,
+	BlackType: null,
+	EventDate: null,
+	EventSponsor: null,
+	Section: null,
+	Stage: null,
+	Board: null,
+	Opening: null,
+	Variation: null,
+	SubVariation: null,
+	ECO: null,
+	NIC: null,
+	Time: null,
+	UTCTime: null,
+	UTCDate: null,
+	TimeControl: null,
+	SetUp: null,
+	FEN: null,
+	Termination: null,
+	Annotator: null,
+	Mode: null,
+	PlyCount: null
+}, w = {
+	...ee,
+	...te
+}, T = {
+	a8: 0,
+	b8: 1,
+	c8: 2,
+	d8: 3,
+	e8: 4,
+	f8: 5,
+	g8: 6,
+	h8: 7,
+	a7: 16,
+	b7: 17,
+	c7: 18,
+	d7: 19,
+	e7: 20,
+	f7: 21,
+	g7: 22,
+	h7: 23,
+	a6: 32,
+	b6: 33,
+	c6: 34,
+	d6: 35,
+	e6: 36,
+	f6: 37,
+	g6: 38,
+	h6: 39,
+	a5: 48,
+	b5: 49,
+	c5: 50,
+	d5: 51,
+	e5: 52,
+	f5: 53,
+	g5: 54,
+	h5: 55,
+	a4: 64,
+	b4: 65,
+	c4: 66,
+	d4: 67,
+	e4: 68,
+	f4: 69,
+	g4: 70,
+	h4: 71,
+	a3: 80,
+	b3: 81,
+	c3: 82,
+	d3: 83,
+	e3: 84,
+	f3: 85,
+	g3: 86,
+	h3: 87,
+	a2: 96,
+	b2: 97,
+	c2: 98,
+	d2: 99,
+	e2: 100,
+	f2: 101,
+	g2: 102,
+	h2: 103,
+	a1: 112,
+	b1: 113,
+	c1: 114,
+	d1: 115,
+	e1: 116,
+	f1: 117,
+	g1: 118,
+	h1: 119
+}, E = {
+	b: [
+		16,
+		32,
+		17,
+		15
+	],
+	w: [
+		-16,
+		-32,
+		-17,
+		-15
+	]
+}, D = {
+	n: [
+		-18,
+		-33,
+		-31,
+		-14,
+		18,
+		33,
+		31,
+		14
+	],
+	b: [
+		-17,
+		-15,
+		17,
+		15
+	],
+	r: [
+		-16,
+		1,
+		16,
+		-1
+	],
+	q: [
+		-17,
+		-16,
+		-15,
+		1,
+		17,
+		16,
+		15,
+		-1
+	],
+	k: [
+		-17,
+		-16,
+		-15,
+		1,
+		17,
+		16,
+		15,
+		-1
+	]
+}, ne = [
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	24,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	2,
+	24,
+	2,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	2,
+	53,
+	56,
+	53,
+	2,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	24,
+	24,
+	24,
+	24,
+	24,
+	24,
+	56,
+	0,
+	56,
+	24,
+	24,
+	24,
+	24,
+	24,
+	24,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	2,
+	53,
+	56,
+	53,
+	2,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	2,
+	24,
+	2,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	24,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20,
+	0,
+	0,
+	20,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	24,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	20
+], O = [
+	17,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	16,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	15,
+	0,
+	0,
+	17,
+	0,
+	0,
+	0,
+	0,
+	0,
+	16,
+	0,
+	0,
+	0,
+	0,
+	0,
+	15,
+	0,
+	0,
+	0,
+	0,
+	17,
+	0,
+	0,
+	0,
+	0,
+	16,
+	0,
+	0,
+	0,
+	0,
+	15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	17,
+	0,
+	0,
+	0,
+	16,
+	0,
+	0,
+	0,
+	15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	17,
+	0,
+	0,
+	16,
+	0,
+	0,
+	15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	17,
+	0,
+	16,
+	0,
+	15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	17,
+	16,
+	15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	1,
+	1,
+	1,
+	1,
+	1,
+	1,
+	1,
+	0,
+	-1,
+	-1,
+	-1,
+	-1,
+	-1,
+	-1,
+	-1,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-15,
+	-16,
+	-17,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-15,
+	0,
+	-16,
+	0,
+	-17,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-15,
+	0,
+	0,
+	-16,
+	0,
+	0,
+	-17,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-15,
+	0,
+	0,
+	0,
+	-16,
+	0,
+	0,
+	0,
+	-17,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-15,
+	0,
+	0,
+	0,
+	0,
+	-16,
+	0,
+	0,
+	0,
+	0,
+	-17,
+	0,
+	0,
+	0,
+	0,
+	-15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-16,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-17,
+	0,
+	0,
+	-15,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-16,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	-17
+], re = {
+	p: 1,
+	n: 2,
+	b: 4,
+	r: 8,
+	q: 16,
+	k: 32
+}, ie = "pnbrqkPNBRQK", ae = [
+	"n",
+	"b",
+	"r",
+	"q"
+], oe = 7, se = 6, ce = 1, le = 0, k = {
+	k: C.KSIDE_CASTLE,
+	q: C.QSIDE_CASTLE
+}, A = {
+	w: [{
+		square: T.a1,
+		flag: C.QSIDE_CASTLE
+	}, {
+		square: T.h1,
+		flag: C.KSIDE_CASTLE
+	}],
+	b: [{
+		square: T.a8,
+		flag: C.QSIDE_CASTLE
+	}, {
+		square: T.h8,
+		flag: C.KSIDE_CASTLE
+	}]
+}, ue = {
+	b: ce,
+	w: se
+}, de = "--";
+function j(e) {
+	return e >> 4;
+}
+function M(e) {
+	return e & 15;
+}
+function fe(e) {
+	return "0123456789".indexOf(e) !== -1;
+}
+function N(e) {
+	let t = M(e), n = j(e);
+	return "abcdefgh".substring(t, t + 1) + "87654321".substring(n, n + 1);
+}
+function P(e) {
+	return e === "w" ? "b" : "w";
+}
+function F(e) {
+	let t = e.split(/\s+/);
+	if (t.length !== 6) return {
+		ok: !1,
+		error: "Invalid FEN: must contain six space-delimited fields"
+	};
+	let n = parseInt(t[5], 10);
+	if (isNaN(n) || n <= 0) return {
+		ok: !1,
+		error: "Invalid FEN: move number must be a positive integer"
+	};
+	let r = parseInt(t[4], 10);
+	if (isNaN(r) || r < 0) return {
+		ok: !1,
+		error: "Invalid FEN: half move counter number must be a non-negative integer"
+	};
+	if (!/^(-|[abcdefgh][36])$/.test(t[3])) return {
+		ok: !1,
+		error: "Invalid FEN: en-passant square is invalid"
+	};
+	if (/[^kKqQ-]/.test(t[2])) return {
+		ok: !1,
+		error: "Invalid FEN: castling availability is invalid"
+	};
+	if (!/^(w|b)$/.test(t[1])) return {
+		ok: !1,
+		error: "Invalid FEN: side-to-move is invalid"
+	};
+	let i = t[0].split("/");
+	if (i.length !== 8) return {
+		ok: !1,
+		error: "Invalid FEN: piece data does not contain 8 '/'-delimited rows"
+	};
+	for (let e = 0; e < i.length; e++) {
+		let t = 0, n = !1;
+		for (let r = 0; r < i[e].length; r++) if (fe(i[e][r])) {
+			if (n) return {
+				ok: !1,
+				error: "Invalid FEN: piece data is invalid (consecutive number)"
+			};
+			t += parseInt(i[e][r], 10), n = !0;
+		} else {
+			if (!/^[prnbqkPRNBQK]$/.test(i[e][r])) return {
+				ok: !1,
+				error: "Invalid FEN: piece data is invalid (invalid piece)"
+			};
+			t += 1, n = !1;
+		}
+		if (t !== 8) return {
+			ok: !1,
+			error: "Invalid FEN: piece data is invalid (too many squares in rank)"
+		};
+	}
+	if (t[3][1] == "3" && t[1] == "w" || t[3][1] == "6" && t[1] == "b") return {
+		ok: !1,
+		error: "Invalid FEN: illegal en-passant square"
+	};
+	for (let { color: e, regex: n } of [{
+		color: "white",
+		regex: /K/g
+	}, {
+		color: "black",
+		regex: /k/g
+	}]) {
+		if (!n.test(t[0])) return {
+			ok: !1,
+			error: `Invalid FEN: missing ${e} king`
+		};
+		if ((t[0].match(n) || []).length > 1) return {
+			ok: !1,
+			error: `Invalid FEN: too many ${e} kings`
+		};
+	}
+	return Array.from(i[0] + i[7]).some((e) => e.toUpperCase() === "P") ? {
+		ok: !1,
+		error: "Invalid FEN: some pawns are on the edge rows"
+	} : { ok: !0 };
+}
+function pe(e, t) {
+	let n = e.from, r = e.to, i = e.piece, a = 0, o = 0, s = 0;
+	for (let e = 0, c = t.length; e < c; e++) {
+		let c = t[e].from, l = t[e].to;
+		i === t[e].piece && n !== c && r === l && (a++, j(n) === j(c) && o++, M(n) === M(c) && s++);
+	}
+	return a > 0 ? o > 0 && s > 0 ? N(n) : s > 0 ? N(n).charAt(1) : N(n).charAt(0) : "";
+}
+function I(e, t, n, r, i, a = void 0, o = C.NORMAL) {
+	let s = j(r);
+	if (i === "p" && (s === oe || s === le)) for (let s = 0; s < ae.length; s++) {
+		let c = ae[s];
+		e.push({
+			color: t,
+			from: n,
+			to: r,
+			piece: i,
+			captured: a,
+			promotion: c,
+			flags: o | C.PROMOTION
+		});
+	}
+	else e.push({
+		color: t,
+		from: n,
+		to: r,
+		piece: i,
+		captured: a,
+		flags: o
+	});
+}
+function me(e) {
+	let t = e.charAt(0);
+	return t >= "a" && t <= "h" ? e.match(/[a-h]\d.*[a-h]\d/) ? void 0 : "p" : (t = t.toLowerCase(), t === "o" ? "k" : t);
+}
+function he(e) {
+	return e.replace(/=/, "").replace(/[+#]?[?!]*$/, "");
+}
+var L = class {
+	_board = Array(128);
+	_turn = "w";
+	_header = {};
+	_kings = {
+		w: x,
+		b: x
+	};
+	_epSquare = -1;
+	_halfMoves = 0;
+	_moveNumber = 0;
+	_history = [];
+	_comments = {};
+	_castling = {
+		w: 0,
+		b: 0
+	};
+	_hash = 0n;
+	_positionCount = /* @__PURE__ */ new Map();
+	constructor(e = y, { skipValidation: t = !1 } = {}) {
+		this.load(e, { skipValidation: t });
+	}
+	clear({ preserveHeaders: e = !1 } = {}) {
+		this._board = Array(128), this._kings = {
+			w: x,
+			b: x
+		}, this._turn = "w", this._castling = {
+			w: 0,
+			b: 0
+		}, this._epSquare = x, this._halfMoves = 0, this._moveNumber = 1, this._history = [], this._comments = {}, this._header = e ? this._header : { ...w }, this._hash = this._computeHash(), this._positionCount = /* @__PURE__ */ new Map(), this._header.SetUp = null, this._header.FEN = null;
+	}
+	load(e, { skipValidation: t = !1, preserveHeaders: n = !1 } = {}) {
+		let r = e.split(/\s+/);
+		if (r.length >= 2 && r.length < 6 && (e = r.concat([
+			"-",
+			"-",
+			"0",
+			"1"
+		].slice(-(6 - r.length))).join(" ")), r = e.split(/\s+/), !t) {
+			let { ok: t, error: n } = F(e);
+			if (!t) throw Error(n);
+		}
+		let i = r[0], a = 0;
+		this.clear({ preserveHeaders: n });
+		for (let e = 0; e < i.length; e++) {
+			let t = i.charAt(e);
+			if (t === "/") a += 8;
+			else if (fe(t)) a += parseInt(t, 10);
+			else {
+				let e = t < "a" ? "w" : "b";
+				this._put({
+					type: t.toLowerCase(),
+					color: e
+				}, N(a)), a++;
+			}
+		}
+		this._turn = r[1], r[2].indexOf("K") > -1 && (this._castling.w |= C.KSIDE_CASTLE), r[2].indexOf("Q") > -1 && (this._castling.w |= C.QSIDE_CASTLE), r[2].indexOf("k") > -1 && (this._castling.b |= C.KSIDE_CASTLE), r[2].indexOf("q") > -1 && (this._castling.b |= C.QSIDE_CASTLE), this._epSquare = r[3] === "-" ? x : T[r[3]], this._halfMoves = parseInt(r[4], 10), this._moveNumber = parseInt(r[5], 10), this._hash = this._computeHash(), this._updateSetup(e), this._incPositionCount();
+	}
+	fen({ forceEnpassantSquare: e = !1 } = {}) {
+		let t = 0, n = "";
+		for (let e = T.a8; e <= T.h1; e++) {
+			if (this._board[e]) {
+				t > 0 && (n += t, t = 0);
+				let { color: r, type: i } = this._board[e];
+				n += r === "w" ? i.toUpperCase() : i.toLowerCase();
+			} else t++;
+			e + 1 & 136 && (t > 0 && (n += t), e !== T.h1 && (n += "/"), t = 0, e += 8);
+		}
+		let r = "";
+		this._castling.w & C.KSIDE_CASTLE && (r += "K"), this._castling.w & C.QSIDE_CASTLE && (r += "Q"), this._castling.b & C.KSIDE_CASTLE && (r += "k"), this._castling.b & C.QSIDE_CASTLE && (r += "q"), r ||= "-";
+		let i = "-";
+		if (this._epSquare !== x) {
+			if (e) i = N(this._epSquare);
+			else {
+				let e = this._epSquare + (this._turn === "w" ? 16 : -16), t = [e + 1, e - 1];
+				for (let e of t) {
+					if (e & 136) continue;
+					let t = this._turn;
+					if (this._board[e]?.color === t && this._board[e]?.type === "p") {
+						this._makeMove({
+							color: t,
+							from: e,
+							to: this._epSquare,
+							piece: "p",
+							captured: "p",
+							flags: C.EP_CAPTURE
+						});
+						let n = !this._isKingAttacked(t);
+						if (this._undoMove(), n) {
+							i = N(this._epSquare);
+							break;
+						}
+					}
+				}
+			}
+		}
+		return [
+			n,
+			this._turn,
+			r,
+			i,
+			this._halfMoves,
+			this._moveNumber
+		].join(" ");
+	}
+	_pieceKey(e) {
+		if (!this._board[e]) return 0n;
+		let { color: t, type: n } = this._board[e], r = {
+			w: 0,
+			b: 1
+		}[t], i = {
+			p: 0,
+			n: 1,
+			b: 2,
+			r: 3,
+			q: 4,
+			k: 5
+		}[n];
+		return h[r][i][e];
+	}
+	_epKey() {
+		return this._epSquare === x ? 0n : g[this._epSquare & 7];
+	}
+	_castlingKey() {
+		return _[this._castling.w >> 5 | this._castling.b >> 3];
+	}
+	_computeHash() {
+		let e = 0n;
+		for (let t = T.a8; t <= T.h1; t++) t & 136 ? t += 7 : this._board[t] && (e ^= this._pieceKey(t));
+		return e ^= this._epKey(), e ^= this._castlingKey(), this._turn === "b" && (e ^= v), e;
+	}
+	_updateSetup(e) {
+		this._history.length > 0 || (e === "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" ? (this._header.SetUp = null, this._header.FEN = null) : (this._header.SetUp = "1", this._header.FEN = e));
+	}
+	reset() {
+		this.load(y);
+	}
+	get(e) {
+		return this._board[T[e]];
+	}
+	findPiece(e) {
+		let t = [];
+		for (let n = T.a8; n <= T.h1; n++) n & 136 ? n += 7 : this._board[n] && this._board[n]?.color === e.color && this._board[n].color === e.color && this._board[n].type === e.type && t.push(N(n));
+		return t;
+	}
+	put({ type: e, color: t }, n) {
+		return this._put({
+			type: e,
+			color: t
+		}, n) ? (this._updateCastlingRights(), this._updateEnPassantSquare(), this._updateSetup(this.fen()), !0) : !1;
+	}
+	_set(e, t) {
+		this._hash ^= this._pieceKey(e), this._board[e] = t, this._hash ^= this._pieceKey(e);
+	}
+	_put({ type: e, color: t }, n) {
+		if (ie.indexOf(e.toLowerCase()) === -1 || !(n in T)) return !1;
+		let r = T[n];
+		if (e == "k" && this._kings[t] != x && this._kings[t] != r) return !1;
+		let i = this._board[r];
+		return i && i.type === "k" && (this._kings[i.color] = x), this._set(r, {
+			type: e,
+			color: t
+		}), e === "k" && (this._kings[t] = r), !0;
+	}
+	_clear(e) {
+		this._hash ^= this._pieceKey(e), delete this._board[e];
+	}
+	remove(e) {
+		let t = this.get(e);
+		return this._clear(T[e]), t && t.type === "k" && (this._kings[t.color] = x), this._updateCastlingRights(), this._updateEnPassantSquare(), this._updateSetup(this.fen()), t;
+	}
+	_updateCastlingRights() {
+		this._hash ^= this._castlingKey();
+		let e = this._board[T.e1]?.type === "k" && this._board[T.e1]?.color === "w", t = this._board[T.e8]?.type === "k" && this._board[T.e8]?.color === "b";
+		e && this._board[T.a1]?.type === "r" && this._board[T.a1]?.color === "w" || (this._castling.w &= -65), e && this._board[T.h1]?.type === "r" && this._board[T.h1]?.color === "w" || (this._castling.w &= -33), t && this._board[T.a8]?.type === "r" && this._board[T.a8]?.color === "b" || (this._castling.b &= -65), t && this._board[T.h8]?.type === "r" && this._board[T.h8]?.color === "b" || (this._castling.b &= -33), this._hash ^= this._castlingKey();
+	}
+	_updateEnPassantSquare() {
+		if (this._epSquare === x) return;
+		let e = this._epSquare + (this._turn === "w" ? -16 : 16), t = this._epSquare + (this._turn === "w" ? 16 : -16), n = [t + 1, t - 1];
+		this._board[e] !== null || this._board[this._epSquare] !== null || this._board[t]?.color !== P(this._turn) || this._board[t]?.type !== "p" ? (this._hash ^= this._epKey(), this._epSquare = x) : n.some((e) => !(e & 136) && this._board[e]?.color === this._turn && this._board[e]?.type === "p") || (this._hash ^= this._epKey(), this._epSquare = x);
+	}
+	_attacked(e, t, n) {
+		let r = [];
+		for (let i = T.a8; i <= T.h1; i++) {
+			if (i & 136) {
+				i += 7;
+				continue;
+			}
+			if (this._board[i] === void 0 || this._board[i].color !== e) continue;
+			let a = this._board[i], o = i - t;
+			if (o === 0) continue;
+			let s = o + 119;
+			if (ne[s] & re[a.type]) {
+				if (a.type === "p") {
+					if (o > 0 && a.color === "w" || o <= 0 && a.color === "b") {
+						if (n) r.push(N(i));
+						else return !0;
+					}
+					continue;
+				}
+				if (a.type === "n" || a.type === "k") {
+					if (n) {
+						r.push(N(i));
+						continue;
+					}
+					return !0;
+				}
+				let e = O[s], c = i + e, l = !1;
+				for (; c !== t;) {
+					if (this._board[c] != null) {
+						l = !0;
+						break;
+					}
+					c += e;
+				}
+				if (!l) {
+					if (n) {
+						r.push(N(i));
+						continue;
+					}
+					return !0;
+				}
+			}
+		}
+		return n ? r : !1;
+	}
+	attackers(e, t) {
+		return t ? this._attacked(t, T[e], !0) : this._attacked(this._turn, T[e], !0);
+	}
+	_isKingAttacked(e) {
+		let t = this._kings[e];
+		return t !== -1 && this._attacked(P(e), t);
+	}
+	hash() {
+		return this._hash.toString(16);
+	}
+	isAttacked(e, t) {
+		return this._attacked(t, T[e]);
+	}
+	isCheck() {
+		return this._isKingAttacked(this._turn);
+	}
+	inCheck() {
+		return this.isCheck();
+	}
+	isCheckmate() {
+		return this.isCheck() && this._moves().length === 0;
+	}
+	isStalemate() {
+		return !this.isCheck() && this._moves().length === 0;
+	}
+	isInsufficientMaterial() {
+		let e = {
+			b: 0,
+			n: 0,
+			r: 0,
+			q: 0,
+			k: 0,
+			p: 0
+		}, t = [], n = 0, r = 0;
+		for (let i = T.a8; i <= T.h1; i++) {
+			if (r = (r + 1) % 2, i & 136) {
+				i += 7;
+				continue;
+			}
+			let a = this._board[i];
+			a && (e[a.type] = a.type in e ? e[a.type] + 1 : 1, a.type === "b" && t.push(r), n++);
+		}
+		if (n === 2 || n === 3 && (e.b === 1 || e.n === 1)) return !0;
+		if (n === e.b + 2) {
+			let e = 0, n = t.length;
+			for (let r = 0; r < n; r++) e += t[r];
+			if (e === 0 || e === n) return !0;
+		}
+		return !1;
+	}
+	isThreefoldRepetition() {
+		return this._getPositionCount(this._hash) >= 3;
+	}
+	isDrawByFiftyMoves() {
+		return this._halfMoves >= 100;
+	}
+	isDraw() {
+		return this.isDrawByFiftyMoves() || this.isStalemate() || this.isInsufficientMaterial() || this.isThreefoldRepetition();
+	}
+	isGameOver() {
+		return this.isCheckmate() || this.isDraw();
+	}
+	moves({ verbose: e = !1, square: t = void 0, piece: n = void 0 } = {}) {
+		let r = this._moves({
+			square: t,
+			piece: n
+		});
+		return e ? r.map((e) => new b(this, e)) : r.map((e) => this._moveToSan(e, r));
+	}
+	_moves({ legal: e = !0, piece: t = void 0, square: n = void 0 } = {}) {
+		let r = n ? n.toLowerCase() : void 0, i = t?.toLowerCase(), a = [], o = this._turn, s = P(o), c = T.a8, l = T.h1, u = !1;
+		if (r) {
+			if (r in T) c = l = T[r], u = !0;
+			else return [];
+		}
+		for (let e = c; e <= l; e++) {
+			if (e & 136) {
+				e += 7;
+				continue;
+			}
+			if (!this._board[e] || this._board[e].color === s) continue;
+			let { type: t } = this._board[e], n;
+			if (t === "p") {
+				if (i && i !== t) continue;
+				n = e + E[o][0], this._board[n] || (I(a, o, e, n, "p"), n = e + E[o][1], ue[o] === j(e) && !this._board[n] && I(a, o, e, n, "p", void 0, C.BIG_PAWN));
+				for (let t = 2; t < 4; t++) n = e + E[o][t], n & 136 || (this._board[n]?.color === s ? I(a, o, e, n, "p", this._board[n].type, C.CAPTURE) : n === this._epSquare && I(a, o, e, n, "p", "p", C.EP_CAPTURE));
+			} else {
+				if (i && i !== t) continue;
+				for (let r = 0, i = D[t].length; r < i; r++) {
+					let i = D[t][r];
+					for (n = e; n += i, !(n & 136);) {
+						if (!this._board[n]) I(a, o, e, n, t);
+						else {
+							if (this._board[n].color === o) break;
+							I(a, o, e, n, t, this._board[n].type, C.CAPTURE);
+							break;
+						}
+						if (t === "n" || t === "k") break;
+					}
+				}
+			}
+		}
+		if ((i === void 0 || i === "k") && (!u || l === this._kings[o])) {
+			if (this._castling[o] & C.KSIDE_CASTLE) {
+				let e = this._kings[o], t = e + 2;
+				this._board[e + 1] || this._board[t] || this._attacked(s, this._kings[o]) || this._attacked(s, e + 1) || this._attacked(s, t) || I(a, o, this._kings[o], t, "k", void 0, C.KSIDE_CASTLE);
+			}
+			if (this._castling[o] & C.QSIDE_CASTLE) {
+				let e = this._kings[o], t = e - 2;
+				this._board[e - 1] || this._board[e - 2] || this._board[e - 3] || this._attacked(s, this._kings[o]) || this._attacked(s, e - 1) || this._attacked(s, t) || I(a, o, this._kings[o], t, "k", void 0, C.QSIDE_CASTLE);
+			}
+		}
+		if (!e || this._kings[o] === -1) return a;
+		let d = [];
+		for (let e = 0, t = a.length; e < t; e++) this._makeMove(a[e]), this._isKingAttacked(o) || d.push(a[e]), this._undoMove();
+		return d;
+	}
+	move(e, { strict: t = !1 } = {}) {
+		let n = null;
+		if (typeof e == "string") n = this._moveFromSan(e, t);
+		else if (e === null) n = this._moveFromSan(de, t);
+		else if (typeof e == "object") {
+			let t = this._moves();
+			for (let r = 0, i = t.length; r < i; r++) if (e.from === N(t[r].from) && e.to === N(t[r].to) && (!("promotion" in t[r]) || e.promotion === t[r].promotion)) {
+				n = t[r];
+				break;
+			}
+		}
+		if (!n) throw Error(typeof e == "string" ? `Invalid move: ${e}` : `Invalid move: ${JSON.stringify(e)}`);
+		if (this.isCheck() && n.flags & C.NULL_MOVE) throw Error("Null move not allowed when in check");
+		let r = new b(this, n);
+		return this._makeMove(n), this._incPositionCount(), r;
+	}
+	_push(e) {
+		this._history.push({
+			move: e,
+			kings: {
+				b: this._kings.b,
+				w: this._kings.w
+			},
+			turn: this._turn,
+			castling: {
+				b: this._castling.b,
+				w: this._castling.w
+			},
+			epSquare: this._epSquare,
+			halfMoves: this._halfMoves,
+			moveNumber: this._moveNumber
+		});
+	}
+	_movePiece(e, t) {
+		this._hash ^= this._pieceKey(e), this._board[t] = this._board[e], delete this._board[e], this._hash ^= this._pieceKey(t);
+	}
+	_makeMove(e) {
+		let t = this._turn, n = P(t);
+		if (this._push(e), e.flags & C.NULL_MOVE) t === "b" && this._moveNumber++, this._halfMoves++, this._turn = n, this._epSquare = x;
+		else {
+			if (this._hash ^= this._epKey(), this._hash ^= this._castlingKey(), e.captured && (this._hash ^= this._pieceKey(e.to)), this._movePiece(e.from, e.to), e.flags & C.EP_CAPTURE && (this._turn === "b" ? this._clear(e.to - 16) : this._clear(e.to + 16)), e.promotion && (this._clear(e.to), this._set(e.to, {
+				type: e.promotion,
+				color: t
+			})), this._board[e.to].type === "k") {
+				if (this._kings[t] = e.to, e.flags & C.KSIDE_CASTLE) {
+					let t = e.to - 1, n = e.to + 1;
+					this._movePiece(n, t);
+				} else if (e.flags & C.QSIDE_CASTLE) {
+					let t = e.to + 1, n = e.to - 2;
+					this._movePiece(n, t);
+				}
+				this._castling[t] = 0;
+			}
+			if (this._castling[t]) {
+				for (let n = 0, r = A[t].length; n < r; n++) if (e.from === A[t][n].square && this._castling[t] & A[t][n].flag) {
+					this._castling[t] ^= A[t][n].flag;
+					break;
+				}
+			}
+			if (this._castling[n]) {
+				for (let t = 0, r = A[n].length; t < r; t++) if (e.to === A[n][t].square && this._castling[n] & A[n][t].flag) {
+					this._castling[n] ^= A[n][t].flag;
+					break;
+				}
+			}
+			if (this._hash ^= this._castlingKey(), e.flags & C.BIG_PAWN) {
+				let r;
+				r = t === "b" ? e.to - 16 : e.to + 16, !(e.to - 1 & 136) && this._board[e.to - 1]?.type === "p" && this._board[e.to - 1]?.color === n || !(e.to + 1 & 136) && this._board[e.to + 1]?.type === "p" && this._board[e.to + 1]?.color === n ? (this._epSquare = r, this._hash ^= this._epKey()) : this._epSquare = x;
+			} else this._epSquare = x;
+			e.piece === "p" || e.flags & (C.CAPTURE | C.EP_CAPTURE) ? this._halfMoves = 0 : this._halfMoves++, t === "b" && this._moveNumber++, this._turn = n, this._hash ^= v;
+		}
+	}
+	undo() {
+		let e = this._hash, t = this._undoMove();
+		if (t) {
+			let n = new b(this, t);
+			return this._decPositionCount(e), n;
+		}
+		return null;
+	}
+	_undoMove() {
+		let e = this._history.pop();
+		if (e === void 0) return null;
+		this._hash ^= this._epKey(), this._hash ^= this._castlingKey();
+		let t = e.move;
+		this._kings = e.kings, this._turn = e.turn, this._castling = e.castling, this._epSquare = e.epSquare, this._halfMoves = e.halfMoves, this._moveNumber = e.moveNumber, this._hash ^= this._epKey(), this._hash ^= this._castlingKey(), this._hash ^= v;
+		let n = this._turn, r = P(n);
+		if (t.flags & C.NULL_MOVE) return t;
+		if (this._movePiece(t.to, t.from), t.piece && (this._clear(t.from), this._set(t.from, {
+			type: t.piece,
+			color: n
+		})), t.captured) {
+			if (t.flags & C.EP_CAPTURE) {
+				let e;
+				e = n === "b" ? t.to - 16 : t.to + 16, this._set(e, {
+					type: "p",
+					color: r
+				});
+			} else this._set(t.to, {
+				type: t.captured,
+				color: r
+			});
+		}
+		if (t.flags & (C.KSIDE_CASTLE | C.QSIDE_CASTLE)) {
+			let e, n;
+			t.flags & C.KSIDE_CASTLE ? (e = t.to + 1, n = t.to - 1) : (e = t.to - 2, n = t.to + 1), this._movePiece(n, e);
+		}
+		return t;
+	}
+	pgn({ newline: e = "\n", maxWidth: t = 0 } = {}) {
+		let n = [], r = !1;
+		for (let t in this._header) this._header[t] && n.push(`[${t} "${this._header[t]}"]` + e), r = !0;
+		r && this._history.length && n.push(e);
+		let i = (e) => {
+			let t = this._comments[this.fen()];
+			if (t !== void 0) {
+				let n = e.length > 0 ? " " : "";
+				e = `${e}${n}{${t}}`;
+			}
+			return e;
+		}, a = [];
+		for (; this._history.length > 0;) a.push(this._undoMove());
+		let o = [], s = "";
+		for (a.length === 0 && o.push(i("")); a.length > 0;) {
+			s = i(s);
+			let e = a.pop();
+			if (!e) break;
+			if (!this._history.length && e.color === "b") {
+				let e = `${this._moveNumber}. ...`;
+				s = s ? `${s} ${e}` : e;
+			} else e.color === "w" && (s.length && o.push(s), s = this._moveNumber + ".");
+			s = s + " " + this._moveToSan(e, this._moves({ legal: !0 })), this._makeMove(e);
+		}
+		if (s.length && o.push(i(s)), o.push(this._header.Result || "*"), t === 0) return n.join("") + o.join(" ");
+		let c = function() {
+			return n.length > 0 && n[n.length - 1] === " " && (n.pop(), !0);
+		}, l = function(r, i) {
+			for (let a of i.split(" ")) if (a) {
+				if (r + a.length > t) {
+					for (; c();) r--;
+					n.push(e), r = 0;
+				}
+				n.push(a), r += a.length, n.push(" "), r++;
+			}
+			return c() && r--, r;
+		}, u = 0;
+		for (let r = 0; r < o.length; r++) u + o[r].length > t && o[r].includes("{") ? u = l(u, o[r]) : (u + o[r].length > t && r !== 0 ? (n[n.length - 1] === " " && n.pop(), n.push(e), u = 0) : r !== 0 && (n.push(" "), u++), n.push(o[r]), u += o[r].length);
+		return n.join("");
+	}
+	header(...e) {
+		for (let t = 0; t < e.length; t += 2) typeof e[t] == "string" && typeof e[t + 1] == "string" && (this._header[e[t]] = e[t + 1]);
+		return this._header;
+	}
+	setHeader(e, t) {
+		return this._header[e] = t ?? ee[e] ?? null, this.getHeaders();
+	}
+	removeHeader(e) {
+		return e in this._header && (this._header[e] = ee[e] || null, !0);
+	}
+	getHeaders() {
+		let e = {};
+		for (let [t, n] of Object.entries(this._header)) n !== null && (e[t] = n);
+		return e;
+	}
+	loadPgn(e, { strict: t = !1, newlineChar: n = "\r?\n" } = {}) {
+		n !== "\r?\n" && (e = e.replace(new RegExp(n, "g"), "\n"));
+		let r = l(e);
+		this.reset();
+		let i = r.headers, a = "";
+		for (let e in i) e.toLowerCase() === "fen" && (a = i[e]), this.header(e, i[e]);
+		if (!t) a && this.load(a, { preserveHeaders: !0 });
+		else if (i.SetUp === "1") {
+			if (!("FEN" in i)) throw Error("Invalid PGN: FEN tag must be supplied with SetUp tag");
+			this.load(i.FEN, { preserveHeaders: !0 });
+		}
+		let o = r.root;
+		for (; o;) {
+			if (o.move) {
+				let e = this._moveFromSan(o.move, t);
+				if (e == null) throw Error(`Invalid move in PGN: ${o.move}`);
+				this._makeMove(e), this._incPositionCount();
+			}
+			o.comment !== void 0 && (this._comments[this.fen()] = o.comment), o = o.variations[0];
+		}
+		let s = r.result;
+		s && Object.keys(this._header).length && this._header.Result !== s && this.setHeader("Result", s);
+	}
+	_moveToSan(e, t) {
+		let n = "";
+		if (e.flags & C.KSIDE_CASTLE) n = "O-O";
+		else if (e.flags & C.QSIDE_CASTLE) n = "O-O-O";
+		else if (e.flags & C.NULL_MOVE) return de;
+		else {
+			if (e.piece !== "p") {
+				let r = pe(e, t);
+				n += e.piece.toUpperCase() + r;
+			}
+			e.flags & (C.CAPTURE | C.EP_CAPTURE) && (e.piece === "p" && (n += N(e.from)[0]), n += "x"), n += N(e.to), e.promotion && (n += "=" + e.promotion.toUpperCase());
+		}
+		return this._makeMove(e), this.isCheck() && (this.isCheckmate() ? n += "#" : n += "+"), this._undoMove(), n;
+	}
+	_moveFromSan(e, t = !1) {
+		let n = he(e);
+		if (t || (n === "0-0" ? n = "O-O" : n === "0-0-0" && (n = "O-O-O")), n == de) return {
+			color: this._turn,
+			from: 0,
+			to: 0,
+			piece: "k",
+			flags: C.NULL_MOVE
+		};
+		let r = me(n), i = this._moves({
+			legal: !0,
+			piece: r
+		});
+		for (let e = 0, t = i.length; e < t; e++) if (n === he(this._moveToSan(i[e], i))) return i[e];
+		if (t) return null;
+		let a, o, s, c, l, u = !1;
+		if (o = n.match(/([pnbrqkPNBRQK])?([a-h][1-8])x?-?([a-h][1-8])([qrbnQRBN])?/), o ? (a = o[1], s = o[2], c = o[3], l = o[4], s.length == 1 && (u = !0)) : (o = n.match(/([pnbrqkPNBRQK])?([a-h]?[1-8]?)x?-?([a-h][1-8])([qrbnQRBN])?/), o && (a = o[1], s = o[2], c = o[3], l = o[4], s.length == 1 && (u = !0))), r = me(n), i = this._moves({
+			legal: !0,
+			piece: a || r
+		}), !c) return null;
+		for (let e = 0, t = i.length; e < t; e++) if (!s) {
+			if (n === he(this._moveToSan(i[e], i)).replace("x", "")) return i[e];
+		} else if ((!a || a.toLowerCase() == i[e].piece) && T[s] == i[e].from && T[c] == i[e].to && (!l || l.toLowerCase() == i[e].promotion)) return i[e];
+		else if (u) {
+			let t = N(i[e].from);
+			if ((!a || a.toLowerCase() == i[e].piece) && T[c] == i[e].to && (s == t[0] || s == t[1]) && (!l || l.toLowerCase() == i[e].promotion)) return i[e];
+		}
+		return null;
+	}
+	ascii() {
+		let e = "   +------------------------+\n";
+		for (let t = T.a8; t <= T.h1; t++) {
+			if (M(t) === 0 && (e += " " + "87654321"[j(t)] + " |"), this._board[t]) {
+				let n = this._board[t].type, r = this._board[t].color === "w" ? n.toUpperCase() : n.toLowerCase();
+				e += " " + r + " ";
+			} else e += " . ";
+			t + 1 & 136 && (e += "|\n", t += 8);
+		}
+		return e += "   +------------------------+\n", e += "     a  b  c  d  e  f  g  h", e;
+	}
+	perft(e) {
+		let t = this._moves({ legal: !1 }), n = 0, r = this._turn;
+		for (let i = 0, a = t.length; i < a; i++) this._makeMove(t[i]), this._isKingAttacked(r) || (e - 1 > 0 ? n += this.perft(e - 1) : n++), this._undoMove();
+		return n;
+	}
+	setTurn(e) {
+		return this._turn != e && (this.move("--"), !0);
+	}
+	turn() {
+		return this._turn;
+	}
+	board() {
+		let e = [], t = [];
+		for (let n = T.a8; n <= T.h1; n++) this._board[n] == null ? t.push(null) : t.push({
+			square: N(n),
+			type: this._board[n].type,
+			color: this._board[n].color
+		}), n + 1 & 136 && (e.push(t), t = [], n += 8);
+		return e;
+	}
+	squareColor(e) {
+		if (e in T) {
+			let t = T[e];
+			return (j(t) + M(t)) % 2 == 0 ? "light" : "dark";
+		}
+		return null;
+	}
+	history({ verbose: e = !1 } = {}) {
+		let t = [], n = [];
+		for (; this._history.length > 0;) t.push(this._undoMove());
+		for (;;) {
+			let r = t.pop();
+			if (!r) break;
+			e ? n.push(new b(this, r)) : n.push(this._moveToSan(r, this._moves())), this._makeMove(r);
+		}
+		return n;
+	}
+	_getPositionCount(e) {
+		return this._positionCount.get(e) ?? 0;
+	}
+	_incPositionCount() {
+		this._positionCount.set(this._hash, (this._positionCount.get(this._hash) ?? 0) + 1);
+	}
+	_decPositionCount(e) {
+		let t = this._positionCount.get(e) ?? 0;
+		t === 1 ? this._positionCount.delete(e) : this._positionCount.set(e, t - 1);
+	}
+	_pruneComments() {
+		let e = [], t = {}, n = (e) => {
+			e in this._comments && (t[e] = this._comments[e]);
+		};
+		for (; this._history.length > 0;) e.push(this._undoMove());
+		for (n(this.fen());;) {
+			let t = e.pop();
+			if (!t) break;
+			this._makeMove(t), n(this.fen());
+		}
+		this._comments = t;
+	}
+	getComment() {
+		return this._comments[this.fen()];
+	}
+	setComment(e) {
+		this._comments[this.fen()] = e.replace("{", "[").replace("}", "]");
+	}
+	deleteComment() {
+		return this.removeComment();
+	}
+	removeComment() {
+		let e = this._comments[this.fen()];
+		return delete this._comments[this.fen()], e;
+	}
+	getComments() {
+		return this._pruneComments(), Object.keys(this._comments).map((e) => ({
+			fen: e,
+			comment: this._comments[e]
+		}));
+	}
+	deleteComments() {
+		return this.removeComments();
+	}
+	removeComments() {
+		return this._pruneComments(), Object.keys(this._comments).map((e) => {
+			let t = this._comments[e];
+			return delete this._comments[e], {
+				fen: e,
+				comment: t
+			};
+		});
+	}
+	setCastlingRights(e, t) {
+		for (let n of ["k", "q"]) t[n] !== void 0 && (t[n] ? this._castling[e] |= k[n] : this._castling[e] &= ~k[n]);
+		this._updateCastlingRights();
+		let n = this.getCastlingRights(e);
+		return (t.k === void 0 || t.k === n.k) && (t.q === void 0 || t.q === n.q);
+	}
+	getCastlingRights(e) {
+		return {
+			k: (this._castling[e] & k.k) !== 0,
+			q: (this._castling[e] & k.q) !== 0
+		};
+	}
+	moveNumber() {
+		return this._moveNumber;
+	}
+};
+// src/lib/accuracy.ts
+function R(e) {
+	return e.type === "cp" ? e.value : e.value === 0 ? -1e4 : Math.sign(e.value) * (21 - Math.min(10, Math.abs(e.value))) * 100;
+}
+function ge(e) {
+	return 50 + 50 * (2 / (1 + Math.exp(-.00368208 * Math.max(-1e3, Math.min(1e3, e)))) - 1);
+}
+function _e(e) {
+	return e.type === "mate" && e.value === 0 ? 0 : ge(R(e));
+}
+function ve(e) {
+	return {
+		type: e.type,
+		value: e.value === 0 && e.type === "mate" ? 0 : -e.value
+	};
+}
+function z(e, t) {
+	return e.type === "mate" && e.value === 0 ? {
+		type: "cp",
+		value: t === "w" ? -1e4 : 1e4
+	} : t === "w" ? e : ve(e);
+}
+var B = {
+	slope: .0015625,
+	decay: .1124375,
+	bonus: .484375,
+	blend: 0,
+	floor: 24.75
+};
+function ye(e) {
+	let t = Math.max(-1e3, Math.min(1e3, e));
+	return 50 + 50 * (2 / (1 + Math.exp(-B.slope * t)) - 1);
+}
+function be(e, t) {
+	let n = ye(e) - ye(t);
+	if (n <= 0) return 100;
+	let r = 103.1668100711649 * Math.exp(-B.decay * n) - 3.166924740191411 + B.bonus;
+	return Math.max(0, Math.min(100, r));
+}
+function xe(e) {
+	let t = e.reduce((e, t) => e + t, 0) / e.length;
+	return Math.sqrt(e.reduce((e, n) => e + (n - t) ** 2, 0) / e.length);
+}
+function Se(e, t, n = "w") {
+	let r = t.length;
+	if (r === 0) return {
+		white: null,
+		black: null
+	};
+	let i = e.map(ye), a = Math.max(2, Math.min(8, Math.floor(r / 10))), o = [], s = i.slice(0, a);
+	for (let e = 0; e < Math.min(a - 2, r); e++) o.push(s);
+	for (let e = 0; e + a <= i.length && o.length < r; e++) o.push(i.slice(e, e + a));
+	for (; o.length < r;) o.push(o[o.length - 1] ?? s);
+	let c = o.map((e) => Math.max(.5, Math.min(12, xe(e)))), l = (e) => {
+		let i = 0, a = 0, o = 0, s = 0;
+		for (let l = 0; l < r; l++) {
+			if ((l % 2 == 0 == (n === "w") ? "w" : "b") !== e) continue;
+			let r = t[l];
+			i += c[l], a += r * c[l], o += 1 / Math.max(r, B.floor), s++;
+		}
+		if (!s) return null;
+		let l = a / i, u = s / o;
+		return B.blend * l + (1 - B.blend) * u;
+	};
+	return {
+		white: l("w"),
+		black: l("b")
+	};
+}
+// src/lib/classify.ts
+var Ce = [
+	"brilliant",
+	"great",
+	"best",
+	"excellent",
+	"good",
+	"book",
+	"forced",
+	"inaccuracy",
+	"mistake",
+	"miss",
+	"blunder"
+], we = {
+	brilliant: {
+		label: "Brilliant",
+		glyph: "!!",
+		color: "#26c2a3"
+	},
+	great: {
+		label: "Great",
+		glyph: "!",
+		color: "#5b8bd6"
+	},
+	best: {
+		label: "Best",
+		glyph: "★",
+		color: "#81b64c"
+	},
+	excellent: {
+		label: "Excellent",
+		glyph: "✓",
+		color: "#81b64c"
+	},
+	good: {
+		label: "Good",
+		glyph: "✓",
+		color: "#95af8a"
+	},
+	book: {
+		label: "Book",
+		glyph: "≡",
+		color: "#a88865"
+	},
+	forced: {
+		label: "Forced",
+		glyph: "→",
+		color: "#8f8f8f"
+	},
+	inaccuracy: {
+		label: "Inaccuracy",
+		glyph: "?!",
+		color: "#f7c631"
+	},
+	mistake: {
+		label: "Mistake",
+		glyph: "?",
+		color: "#e58f2a"
+	},
+	miss: {
+		label: "Miss",
+		glyph: "✕",
+		color: "#ee6b55"
+	},
+	blunder: {
+		label: "Blunder",
+		glyph: "??",
+		color: "#ca3431"
+	}
+}, V = {
+	p: 1,
+	n: 3,
+	b: 3,
+	r: 5,
+	q: 9,
+	k: 0
+};
+function Te(e, t) {
+	let n = t === "w" ? "b" : "w", r = /* @__PURE__ */ new Map();
+	for (let i of e.board()) for (let a of i) {
+		if (!a || a.color !== t || a.type === "k" || a.type === "p") continue;
+		let i = e.attackers(a.square, n);
+		if (!i.length) continue;
+		let o = Math.min(...i.map((t) => V[e.get(t).type] || 0)), s = e.attackers(a.square, t).length > 0;
+		(o < V[a.type] || !s) && r.set(a.square, V[a.type]);
+	}
+	return r;
+}
+function Ee(e, t) {
+	let n = new L(e), r = n.turn(), i = Te(n, r), a = new L(e), o;
+	try {
+		o = a.move({
+			from: t.slice(0, 2),
+			to: t.slice(2, 4),
+			promotion: t[4] || void 0
+		});
+	} catch {
+		return !1;
+	}
+	if (a.isCheckmate()) return !1;
+	let s = o.captured ? V[o.captured] : 0, c = Te(a, r), l = 0;
+	for (let [e, t] of c) i.has(e) && e !== o.to || (l = Math.max(l, t));
+	return l >= 3 && l > s;
+}
+function De(e) {
+	return e.isBook ? "book" : e.legalMoves === 1 ? "forced" : (e.isTopMove || e.winLoss <= 2) && e.sacrifice && e.playedWin >= 45 && e.bestWin < 97 ? "brilliant" : e.isTopMove && !e.isRecapture && e.secondWin !== null && e.bestWin - e.secondWin >= 15 && e.playedWin >= 35 ? "great" : e.isTopMove ? "best" : e.opponentErred && e.winLoss >= 10 && e.bestWin >= 65 ? "miss" : e.winLoss <= 2 ? "excellent" : e.winLoss <= 5 ? "good" : e.winLoss <= 10 ? "inaccuracy" : e.winLoss <= 20 ? "mistake" : "blunder";
+}
+var Oe = {
+	named: /* @__PURE__ */ JSON.parse("{\"1ghkw1ktrnt\":\"A00|Amar Opening\",\"2w322g508v\":\"A00|Amar Opening: Paris Gambit\",\"1s7kdoe9opt\":\"A00|Amar Opening: Paris Gambit, Gent Gambit\",\"163lx1c26up\":\"A00|Amsterdam Attack\",\"mfry58zgy0\":\"A00|Anderssen's Opening\",\"1mb838cnw9e\":\"A00|Anderssen's Opening: Polish Gambit\",\"1v2kzbs47m5\":\"A00|Barnes Opening\",\"1c2py8yt6l3\":\"A00|Barnes Opening: Fool's Mate\",\"2323tuxmkbr\":\"A00|Barnes Opening: Gedult Gambit\",\"1da2rf7895l\":\"A00|Barnes Opening: Gedult Gambit\",\"k1pkh6n3hw\":\"A00|Barnes Opening: Hammerschlag\",\"z7wn4p4co0\":\"A00|Clemenz Opening\",\"rsfyyq1f63\":\"A00|Clemenz Opening: Spike Lee Gambit\",\"p2bc9ugjkz\":\"A00|Creepy Crawly Formation: Classical Defense\",\"1b1oyaahsdu\":\"A00|Formation: Hippopotamus Attack\",\"dkuh81sf5n\":\"A00|Formation: Shy Attack\",\"6pwh9hxotc\":\"A00|Global Opening\",\"1nlvu83ee6s\":\"A00|Grob Opening\",\"f0btn2sc0c\":\"A00|Grob Opening: Alessi Gambit\",\"oomcw0wzjo\":\"A00|Grob Opening: Double Grob\",\"6gm779nnik\":\"A00|Grob Opening: Double Grob, Coca-Cola Gambit\",\"28uezh7flg1\":\"A00|Grob Opening: Grob Gambit\",\"271519lq6hr\":\"A00|Grob Opening: Grob Gambit Declined\",\"f7gekw54u4\":\"A00|Grob Opening: Grob Gambit, Basman Gambit\",\"2dzr3tk4pvp\":\"A00|Grob Opening: Grob Gambit, Fritz Gambit\",\"21efte0z7oa\":\"A00|Grob Opening: Grob Gambit, Fritz Gambit, Romford Countergambit\",\"1lsieh1u7g7\":\"A00|Grob Opening: Grob Gambit, Keres Gambit\",\"oyw544fhaj\":\"A00|Grob Opening: Grob Gambit, Richter-Grob Gambit\",\"2399f66ugmy\":\"A00|Grob Opening: Keene Defense\",\"2a6o3mhxgzi\":\"A00|Grob Opening: Keene Defense, Main Line\",\"145ttzoa8he\":\"A00|Grob Opening: London Defense\",\"5c5btuwtgd\":\"A00|Grob Opening: Romford Countergambit\",\"26hiytyo3lu\":\"A00|Grob Opening: Spike Attack\",\"1t4cnr6i1mj\":\"A00|Grob Opening: Spike, Hurst Attack\",\"rv1mlq0102\":\"A00|Grob Opening: Zilbermints Gambit\",\"24jfttcj8pe\":\"A00|Grob Opening: Zilbermints Gambit, Schiller Defense\",\"1bc68evz8e\":\"A00|Grob Opening: Zilbermints Gambit, Zilbermints-Hartlaub Gambit\",\"10prlf1txsx\":\"A00|Hungarian Opening\",\"2f8k7qnq5z8\":\"A00|Hungarian Opening: Asten Gambit\",\"1iwmaycib54\":\"A00|Hungarian Opening: Burk Gambit\",\"1z67ixl1htt\":\"A00|Hungarian Opening: Bücker Gambit\",\"919hawrm9x\":\"A00|Hungarian Opening: Catalan Formation\",\"11xelzny3le\":\"A00|Hungarian Opening: Dutch Defense\",\"68c2b5e7tz\":\"A00|Hungarian Opening: Indian Defense\",\"1w05gzp0jy2\":\"A00|Hungarian Opening: Myers Defense\",\"pkgryqtzwc\":\"A00|Hungarian Opening: Pachman Gambit\",\"bvscu32jw5\":\"A00|Hungarian Opening: Paris Gambit\",\"s4mwx9bkiy\":\"A00|Hungarian Opening: Reversed Alekhine\",\"260l8h9i3mt\":\"A00|Hungarian Opening: Reversed Brooklyn Defense, Brooklyn Benko Gambit\",\"2g9x3x5q8mv\":\"A00|Hungarian Opening: Reversed Modern Defense\",\"5u0289ygen\":\"A00|Hungarian Opening: Reversed Norwegian Defense\",\"2c6p4qjc9l9\":\"A00|Hungarian Opening: Sicilian Invitation\",\"15rufcywp1s\":\"A00|Hungarian Opening: Slav Formation\",\"27us5pueix7\":\"A00|Hungarian Opening: Symmetrical Variation\",\"19tp7cb2j5\":\"A00|Hungarian Opening: Van Kuijk Gambit\",\"11yonwz2xm0\":\"A00|Hungarian Opening: Winterberg Gambit\",\"1rynv4u866o\":\"A00|Kádas Opening\",\"2bn3m1wgvri\":\"A00|Kádas Opening: Beginner's Trap\",\"1cb35dv0vjn\":\"A00|Kádas Opening: Koola-Koola Variation\",\"r1847t568k\":\"A00|Kádas Opening: Kádas Gambit\",\"wn46azlb4s\":\"A00|Kádas Opening: Kádas Gambit\",\"1lv9uu0b6jb\":\"A00|Kádas Opening: Kádas Gambit\",\"19zj91tkh74\":\"A00|Kádas Opening: Myers Variation\",\"857qn7kp0u\":\"A00|Kádas Opening: Schneider Gambit\",\"oenh5qkfg7\":\"A00|Kádas Opening: Steinbok Gambit\",\"7c8mahvjdv\":\"A00|Lasker Simul Special\",\"25zqoyhi43y\":\"A00|Mieses Opening\",\"2f31amjuugj\":\"A00|Mieses Opening: Myers Spike Attack\",\"1j2u8wowsvk\":\"A00|Mieses Opening: Reversed Rat\",\"228fix48qyb\":\"A00|Mieses Opening: Venezolana Variation\",\"19ua5i5dvi1\":\"A00|Polish Opening\",\"20qt49aksj5\":\"A00|Polish Opening, with d5\",\"rzjlm52swl\":\"A00|Polish Opening, with d5\",\"21fwcna6suo\":\"A00|Polish Opening: Baltic Defense\",\"28i0apput66\":\"A00|Polish Opening: Birmingham Gambit\",\"6o8h70u83h\":\"A00|Polish Opening: Bugayev Advance Variation\",\"fvap73ieis\":\"A00|Polish Opening: Bugayev Attack\",\"n48ig4vgfd\":\"A00|Polish Opening: Czech Defense\",\"6qn4nxoaee\":\"A00|Polish Opening: Dutch Defense\",\"13uc2iimx2v\":\"A00|Polish Opening: German Defense\",\"17p63dful9e\":\"A00|Polish Opening: Grigorian Variation\",\"12vgyzmom69\":\"A00|Polish Opening: Karniewski Variation\",\"25snhd7mgtf\":\"A00|Polish Opening: King's Indian Variation\",\"2b9g9ibvqf1\":\"A00|Polish Opening: King's Indian Variation, Schiffler Attack\",\"27789pkqtu1\":\"A00|Polish Opening: King's Indian Variation, Sokolsky Attack\",\"w5mkfqn0tg\":\"A00|Polish Opening: Myers Variation\",\"1vhrdbza4y4\":\"A00|Polish Opening: Outflank Variation\",\"13pyuf7jcjy\":\"A00|Polish Opening: Outflank Variation, Schuehler Gambit\",\"2bnxg9hw46v\":\"A00|Polish Opening: Queen's Indian Variation\",\"7p4j6il8mi\":\"A00|Polish Opening: Queenside Defense\",\"1uajfzwgsvl\":\"A00|Polish Opening: Rooks Swap Line\",\"26hktfiw9ie\":\"A00|Polish Opening: Schiffler-Sokolsky Variation\",\"1gzpie1hxmr\":\"A00|Polish Opening: Schuehler Gambit\",\"5j8ba1enjl\":\"A00|Polish Opening: Symmetrical Variation\",\"1bx1i0ofgz1\":\"A00|Polish Opening: Tartakower Gambit\",\"20ebfvmut5p\":\"A00|Polish Opening: Wolferts Gambit\",\"1ol93yuf5rs\":\"A00|Saragossa Opening\",\"11dgb436s68\":\"A00|Sodium Attack\",\"25b0qwpx12f\":\"A00|Sodium Attack: Celadon Variation\",\"27u6p5oryvk\":\"A00|Sodium Attack: Chenoboskion Variation\",\"2bdzd1dz5wz\":\"A00|Sodium Attack: Durkin Gambit\",\"1rtuo2m3g8e\":\"A00|Valencia Opening\",\"blp2j9x6z5\":\"A00|Van Geet Opening\",\"1kyfwlcca4a\":\"A00|Van Geet Opening: Battambang Variation\",\"qtqo0ks7o7\":\"A00|Van Geet Opening: Billockus-Johansen Gambit\",\"n9fwabpp30\":\"A00|Van Geet Opening: Damhaug Gambit\",\"d7yejxdgo\":\"A00|Van Geet Opening: Dougherty Gambit\",\"18pocol51ey\":\"A00|Van Geet Opening: Dunst-Perrenet Gambit\",\"1qlvfl3nz0\":\"A00|Van Geet Opening: Düsseldorf Gambit\",\"iq8sfz6syp\":\"A00|Van Geet Opening: Gladbacher Gambit\",\"resv4xesyq\":\"A00|Van Geet Opening: Hector Gambit\",\"b5xwgtszmu\":\"A00|Van Geet Opening: Hergert Gambit\",\"12et8610phz\":\"A00|Van Geet Opening: Hulsemann Gambit\",\"1qbxs4yibit\":\"A00|Van Geet Opening: Jendrossek Gambit\",\"28j43du1xxk\":\"A00|Van Geet Opening: Kluever Gambit\",\"12lqdmjo664\":\"A00|Van Geet Opening: Laroche Gambit\",\"1fpev2gwc3m\":\"A00|Van Geet Opening: Liebig Gambit\",\"27dmb2dzw3j\":\"A00|Van Geet Opening: Melleby Gambit\",\"1903gdr8k5s\":\"A00|Van Geet Opening: Myers Attack\",\"1pysft3nq8p\":\"A00|Van Geet Opening: Napoleon Attack\",\"2c7jh5p6z0i\":\"A00|Van Geet Opening: Novosibirsk Variation\",\"1bgs4kg5u4z\":\"A00|Van Geet Opening: Nowokunski Gambit\",\"j1zngv9j1p\":\"A00|Van Geet Opening: Pfeiffer Gambit\",\"1pth6l6a99s\":\"A00|Van Geet Opening: Pfeiffer Gambit, Sleipnir Countergambit\",\"lcib28y3vk\":\"A00|Van Geet Opening: Reversed Nimzowitsch\",\"1wa65l99q2b\":\"A00|Van Geet Opening: Reversed Scandinavian\",\"25fogafreow\":\"A00|Van Geet Opening: Sicilian Two Knights\",\"11t02qn8cm0\":\"A00|Van Geet Opening: Sleipnir Gambit\",\"16xe3kgpepa\":\"A00|Van Geet Opening: Twyble Attack\",\"mm4gws6rp8\":\"A00|Van Geet Opening: Tübingen Gambit\",\"9fxki4wdte\":\"A00|Van Geet Opening: Venezolana Variation\",\"2dzv0v6wjy0\":\"A00|Van Geet Opening: Warsteiner Gambit\",\"25zb8ukwvpe\":\"A00|Van't Kruijs Opening\",\"17bo1sj726d\":\"A00|Van't Kruijs Opening: Bouncing Bishop Variation\",\"20omp2wfxx8\":\"A00|Van't Kruijs Opening: Keoni-Hiva Gambit, Akahi Variation\",\"1791vy9fm4e\":\"A00|Van't Kruijs Opening: Keoni-Hiva Gambit, Alua Variation\",\"2ar8uwaq6eb\":\"A00|Van't Kruijs Opening: Keoni-Hiva Gambit, Ekolu Variation\",\"99f7fze94k\":\"A00|Ware Opening\",\"2c4wmb80xpi\":\"A00|Ware Opening: Cologne Gambit\",\"8220wmc6z7\":\"A00|Ware Opening: Crab Variation\",\"11bnjb2i41z\":\"A00|Ware Opening: Meadow Hay Trap\",\"3byyz5q8an\":\"A00|Ware Opening: Symmetric Variation\",\"1u4rllse315\":\"A00|Ware Opening: Ware Gambit\",\"1nrwd7ijwb\":\"A00|Ware Opening: Wing Gambit\",\"1lk93alyk32\":\"A01|Nimzo-Larsen Attack\",\"1o9hcxvo06m\":\"A01|Nimzo-Larsen Attack: Classical Variation\",\"1qzxlo9wq0u\":\"A01|Nimzo-Larsen Attack: Dutch Variation\",\"2fzxeguaorj\":\"A01|Nimzo-Larsen Attack: English Variation\",\"9sim2ubw2b\":\"A01|Nimzo-Larsen Attack: Graz Attack\",\"1hzhjpfpt3f\":\"A01|Nimzo-Larsen Attack: Indian Variation\",\"1uv7zs3rhg6\":\"A01|Nimzo-Larsen Attack: Modern Variation\",\"13x6c1kdqg3\":\"A01|Nimzo-Larsen Attack: Modern Variation\",\"1xa6pd69opm\":\"A01|Nimzo-Larsen Attack: Modern Variation\",\"26ly95jf87f\":\"A01|Nimzo-Larsen Attack: Modern Variation\",\"21vyxhp5zvs\":\"A01|Nimzo-Larsen Attack: Pachman Gambit\",\"22afokftj0k\":\"A01|Nimzo-Larsen Attack: Polish Variation\",\"29umkcc07o9\":\"A01|Nimzo-Larsen Attack: Ringelbach Gambit\",\"1wyd0z8zlml\":\"A01|Nimzo-Larsen Attack: Spike Variation\",\"1ig2kg04j94\":\"A01|Nimzo-Larsen Attack: Symmetrical Variation\",\"1cwy97y4pk3\":\"A02|Bird Opening\",\"9c9o7owh3c\":\"A02|Bird Opening: Batavo-Polish Attack\",\"2f9j4a983w8\":\"A02|Bird Opening: Double Duck Formation\",\"1p8tlpoesa1\":\"A02|Bird Opening: From's Gambit\",\"2dvjmp11zez\":\"A02|Bird Opening: From's Gambit, Bahr Gambit\",\"aepeotx2es\":\"A02|Bird Opening: From's Gambit, Langheld Gambit\",\"2eatp5w1tn0\":\"A02|Bird Opening: From's Gambit, Lasker Variation\",\"270ggklu79c\":\"A02|Bird Opening: From's Gambit, Lipke Variation\",\"16ju513li0n\":\"A02|Bird Opening: Hobbs Gambit\",\"tb1adjxv3q\":\"A02|Bird Opening: Hobbs-Zilbermints Gambit\",\"vyehrdc6b6\":\"A02|Bird Opening: Horsefly Defense\",\"2a1lagpniwm\":\"A02|Bird Opening: Lasker Gambit\",\"d8f6zcb1wp\":\"A02|Bird Opening: Mujannah\",\"o5x4frjj70\":\"A02|Bird Opening: Myers Defense\",\"au1sxo8c3t\":\"A02|Bird Opening: Platz Gambit\",\"1k09avi4aby\":\"A02|Bird Opening: Schlechter Gambit\",\"i92b8f7ltf\":\"A02|Bird Opening: Siegener Gambit\",\"jmaasfo05p\":\"A02|Bird Opening: Swiss Gambit\",\"1vi8k8h6ohf\":\"A02|Bird Opening: Wagner-Zwitersch Gambit\",\"2bssgka5k62\":\"A03|Bird Opening: Dutch Variation\",\"10p0bhm28x5\":\"A03|Bird Opening: Dutch Variation, Dudweiler Gambit\",\"m48l98qctg\":\"A03|Bird Opening: Lasker Variation\",\"2fvhyog61oi\":\"A03|Bird Opening: Sturm Gambit\",\"cjl5v4cp2c\":\"A03|Bird Opening: Thomas Gambit\",\"5pkps2otzt\":\"A03|Bird Opening: Williams Gambit\",\"1et37guspko\":\"A03|Bird Opening: Williams Gambit\",\"nl7gjd1mrt\":\"A03|Bird Opening: Williams-Zilbermints Gambit\",\"1of1ac6a3y0\":\"A04|Colle System: Rhamphorhynchus Variation\",\"at7pi3uql9\":\"A04|Modern Defense: Semi-Averbakh Variation, Polish Variation\",\"a5tsxujwx\":\"A04|Modern Defense: Semi-Averbakh Variation, Pterodactyl Variation\",\"25pbzx21l2c\":\"A04|Modern Defense: Semi-Averbakh Variation, Pterodactyl Variation Accepted\",\"1w2aqhjt63k\":\"A04|Zukertort Defense: Kingside Variation\",\"11bpnihdfkk\":\"A04|Zukertort Defense: Sicilian Knight Variation\",\"dyimcw2sl7\":\"A04|Zukertort Opening\",\"2euth9qprt2\":\"A04|Zukertort Opening: Arctic Defense\",\"qyz1n1sklc\":\"A04|Zukertort Opening: Arctic Defense, Drunken Knight Variation\",\"1eohwf3zz2r\":\"A04|Zukertort Opening: Basman Defense\",\"mivo9rcrb8\":\"A04|Zukertort Opening: Black Mustang Defense\",\"g0ywol4o4y\":\"A04|Zukertort Opening: Drunken Cavalry Variation\",\"320sxind2e\":\"A04|Zukertort Opening: Dutch Variation\",\"v7kmkg8qo\":\"A04|Zukertort Opening: Herrstrom Gambit\",\"10sgafbkcul\":\"A04|Zukertort Opening: Kingside Fianchetto\",\"1317fdjazzu\":\"A04|Zukertort Opening: Lisitsyn Gambit\",\"21xt9ylj73t\":\"A04|Zukertort Opening: Lisitsyn Gambit Deferred\",\"xtni1ban9l\":\"A04|Zukertort Opening: Pirc Invitation\",\"1qaw3c967h\":\"A04|Zukertort Opening: Polish Defense\",\"2580xsxwjnm\":\"A04|Zukertort Opening: Queen's Gambit Invitation\",\"j22n7gk85e\":\"A04|Zukertort Opening: Queenside Fianchetto Variation\",\"11utd9s38na\":\"A04|Zukertort Opening: Ross Gambit\",\"1863387lczo\":\"A04|Zukertort Opening: Shabalov Gambit\",\"uh0zbtuyok\":\"A04|Zukertort Opening: Sicilian Invitation\",\"28o7nsawxlf\":\"A04|Zukertort Opening: Slav Invitation\",\"2c90ur1xz0d\":\"A04|Zukertort Opening: Speelsmet Gambit\",\"24cchyuqnsz\":\"A04|Zukertort Opening: St. George Defense\",\"1c1ql4zg6lw\":\"A04|Zukertort Opening: The Walrus\",\"yvnsy30sri\":\"A04|Zukertort Opening: Vos Gambit\",\"2bihi5v5e2p\":\"A04|Zukertort Opening: Wade Defense\",\"2frbj8ztocy\":\"A04|Zukertort Opening: Ware Defense\",\"agty8xp72r\":\"A05|King's Indian Attack\",\"jzas3t51k0\":\"A05|King's Indian Attack: Smyslov Variation\",\"4bz1lpwsf\":\"A05|King's Indian Attack: Spassky Variation\",\"9yusxd6e49\":\"A05|King's Indian Attack: Symmetrical Defense\",\"8vdidp0omm\":\"A05|King's Indian Attack: Wahls Defense\",\"1rl49ywepji\":\"A05|Polish Opening: Zukertort System\",\"2cfxafvdewc\":\"A05|Zukertort Opening\",\"x3ejrvswb7\":\"A05|Zukertort Opening\",\"1ar0frr47gk\":\"A05|Zukertort Opening: Double Fianchetto Attack\",\"1ypgiefu9ot\":\"A05|Zukertort Opening: Lemberger Gambit\",\"2dpwtlubd1q\":\"A05|Zukertort Opening: Myers Polish Attack\",\"27kw5q8wysd\":\"A05|Zukertort Opening: Nimzo-Larsen Variation\",\"1rltqc6rbjk\":\"A05|Zukertort Opening: Quiet System\",\"jbkuw2sf1f\":\"A06|Nimzo-Larsen Attack: Classical Variation\",\"425voxwi43\":\"A06|Nimzo-Larsen Attack: Norfolk Gambit\",\"277nb91rdpu\":\"A06|Nimzo-Larsen Attack: Norfolk Gambit\",\"1k7t3xwmke4\":\"A06|Zukertort Opening\",\"uzb43r2xke\":\"A06|Zukertort Opening: Ampel Variation\",\"1qwbk8inaho\":\"A06|Zukertort Opening: Old Indian Attack\",\"po40ojzqex\":\"A06|Zukertort Opening: Pachman Gambit\",\"o5spsspjpc\":\"A06|Zukertort Opening: Regina-Nu Gambit\",\"7lxfz2frwz\":\"A06|Zukertort Opening: Reversed Mexican Defense\",\"rjlcb4hmoa\":\"A06|Zukertort Opening: Santasiere's Folly\",\"a084q192gb\":\"A06|Zukertort Opening: Tennison Gambit\",\"od8e03ey4m\":\"A06|Zukertort Opening: Tennison Gambit, Brigg's Trap\",\"593j85tqwf\":\"A06|Zukertort Opening: The Potato\",\"ikjqpi5yq3\":\"A07|Hungarian Opening: Wiedenhagen-Beta Gambit\",\"7qdxdvyrlq\":\"A07|King's Indian Attack\",\"21g05tinyv3\":\"A07|King's Indian Attack, with Bf5\",\"2cz56im5orv\":\"A07|King's Indian Attack, with Bf5\",\"nex50hekzw\":\"A07|King's Indian Attack, with Bf5\",\"13sh34dghl2\":\"A07|King's Indian Attack, with Bf5\",\"zhfg0xcqbt\":\"A07|King's Indian Attack, with Bf5\",\"1ltxur7kyov\":\"A07|King's Indian Attack, with e6\",\"1za0474dhss\":\"A07|King's Indian Attack, with e6\",\"745ery6xln\":\"A07|King's Indian Attack: Double Fianchetto\",\"2t5goozpyv\":\"A07|King's Indian Attack: Keres Variation\",\"gvutx0rxbj\":\"A07|King's Indian Attack: Keres Variation\",\"1kd4hgg8ag1\":\"A07|King's Indian Attack: Keres Variation\",\"2efkuniekn9\":\"A07|King's Indian Attack: Keres Variation\",\"2fukofmhyhu\":\"A07|King's Indian Attack: Omega-Delta Gambit\",\"ty3jc99sup\":\"A07|King's Indian Attack: Pachman System\",\"13ujftept3\":\"A07|King's Indian Attack: Sicilian Variation\",\"25uz559bssi\":\"A07|King's Indian Attack: Yugoslav Variation\",\"l29aii14dd\":\"A07|King's Indian Attack: Yugoslav Variation\",\"1f0eapj59hd\":\"A08|King's Indian Attack: French Variation\",\"getmdd2kcr\":\"A08|King's Indian Attack: Sicilian Variation\",\"1agep4dn08\":\"A08|King's Indian Attack: Sicilian Variation\",\"2046l5l35cn\":\"A08|King's Indian Attack: Sicilian Variation\",\"122dz5ra1ie\":\"A08|Zukertort Opening: Reversed Grünfeld\",\"1ucsa64957b\":\"A08|Zukertort Opening: Reversed Grünfeld\",\"18bja2fhoni\":\"A08|Zukertort Opening: Reversed Grünfeld\",\"j2ps9vz3hl\":\"A08|Zukertort Opening: Reversed Grünfeld\",\"1be8mmta0qi\":\"A09|Réti Opening\",\"1zgq2suabvj\":\"A09|Réti Opening: Advance Variation\",\"21qyem6g064\":\"A09|Réti Opening: Advance Variation, Michel Gambit\",\"1dqge70t9ba\":\"A09|Réti Opening: Advance Variation, Navara Gambit\",\"1d6gvzu4v74\":\"A09|Réti Opening: Penguin Variation\",\"1mxkaavdc0w\":\"A09|Réti Opening: Reversed Blumenfeld Gambit\",\"29ju060iu53\":\"A09|Réti Opening: Réti Accepted\",\"1s6ydkpmvhx\":\"A09|Réti Opening: Réti Gambit, Keres Variation\",\"1im4fos1fe8\":\"A09|Réti Opening: Zilbermints Gambit\",\"1a59uzhqu8\":\"A10|English Opening\",\"22uejg2ry7\":\"A10|English Opening: Achilles-Omega Gambit\",\"e4x01es8lq\":\"A10|English Opening: Adorjan Defense\",\"2edn30309f8\":\"A10|English Opening: Anglo-Dutch Defense\",\"1e0f6xqukoa\":\"A10|English Opening: Anglo-Dutch Defense, Hickmann Gambit\",\"1999qxh1b8c\":\"A10|English Opening: Anglo-Dutch Variation, Chabanon Gambit\",\"a06pcm2ptn\":\"A10|English Opening: Anglo-Dutch Variation, Ferenc Gambit\",\"2dczi9a8b76\":\"A10|English Opening: Anglo-Lithuanian Variation\",\"26ihknpw3w2\":\"A10|English Opening: Anglo-Scandinavian Defense\",\"1kfy7i0z1nm\":\"A10|English Opening: Anglo-Scandinavian Defense, Löhn Gambit\",\"m1fy2i0f9n\":\"A10|English Opening: Anglo-Scandinavian Defense, Malvinas Variation\",\"26m63ax0xgv\":\"A10|English Opening: Anglo-Scandinavian Defense, Schulz Gambit\",\"1xec9ylhtbv\":\"A10|English Opening: Great Snake Variation\",\"1mgu2z8yjz7\":\"A10|English Opening: Jaenisch Gambit\",\"1zrfz55cumc\":\"A10|English Opening: King's English Variation, Botvinnik System, Prickly Pawn Pass System\",\"erblf37h8t\":\"A10|English Opening: Myers Defense\",\"2f9z6yap74n\":\"A10|English Opening: Myers Gambit\",\"18m864xdx7k\":\"A10|English Opening: Porcupine Variation\",\"1x3jvqvmlmz\":\"A10|English Opening: Wade Gambit\",\"1e7zv56c6qs\":\"A10|English Opening: Zilbermints Gambit\",\"i5zhga2wfe\":\"A11|English Opening: Caro-Kann Defensive System\",\"m5vo2avr4m\":\"A11|Réti Opening: Anglo-Slav Variation, Gurevich System\",\"15magueyjzx\":\"A11|Réti Opening: Anglo-Slav Variation, Gurevich System\",\"9p2uv6vvbp\":\"A11|Réti Opening: Anglo-Slav Variation, Gurevich System\",\"2egs3e5ml0i\":\"A11|Réti Opening: Anglo-Slav Variation, Gurevich System\",\"8p09nc75rc\":\"A11|Réti Opening: Anglo-Slav Variation, Gurevich System\",\"1c1do1h9any\":\"A11|Réti Opening: Anglo-Slav Variation, with g3\",\"1z6sz4y62kc\":\"A11|Réti Opening: Anglo-Slav Variation, with g3\",\"1bgpvsqryri\":\"A11|Réti Opening: Anglo-Slav Variation, with g3\",\"2cknp4xt1a6\":\"A11|Réti Opening: Anglo-Slav Variation, with g3\",\"13ta7ptxfvv\":\"A11|Réti Opening: Anglo-Slav Variation, with g3\",\"1ajuc6sdzo7\":\"A11|Réti Opening: Anglo-Slav Variation, with g3\",\"drww6freih\":\"A12|Réti Opening: Anglo-Slav Variation\",\"1l250bsae8p\":\"A12|Réti Opening: Anglo-Slav Variation, Bled Variation\",\"fsetmns55u\":\"A12|Réti Opening: Anglo-Slav Variation, Bogoljubow Variation\",\"2cek4g19x57\":\"A12|Réti Opening: Anglo-Slav Variation, Bogoljubow Variation\",\"2a9jo83tpt8\":\"A12|Réti Opening: Anglo-Slav Variation, Bogoljubow Variation\",\"108rh8tyn2l\":\"A12|Réti Opening: Anglo-Slav Variation, Bogoljubow Variation\",\"1j7msci31uc\":\"A12|Réti Opening: Anglo-Slav Variation, Capablanca Variation\",\"2edpmb68aai\":\"A12|Réti Opening: Anglo-Slav Variation, Capablanca Variation\",\"1lwsr4bpmqr\":\"A12|Réti Opening: Anglo-Slav Variation, Capablanca Variation\",\"pb9ztrv158\":\"A12|Réti Opening: Anglo-Slav Variation, London Defensive System\",\"xa6rjur38h\":\"A12|Réti Opening: Anglo-Slav Variation, London Defensive System\",\"7plkzx0gjz\":\"A12|Réti Opening: Anglo-Slav Variation, London Defensive System\",\"1j7vj2zzbde\":\"A12|Réti Opening: Anglo-Slav Variation, London Defensive System\",\"12ool2iiigu\":\"A12|Réti Opening: Anglo-Slav Variation, New York System\",\"5jexr8yi6y\":\"A12|Réti Opening: Anglo-Slav Variation, New York System\",\"or6cd46g26\":\"A12|Réti Opening: Anglo-Slav Variation, New York System\",\"2br5o8w7vl6\":\"A12|Réti Opening: Anglo-Slav Variation, Torre System\",\"3973t79fma\":\"A12|Réti Opening: Anglo-Slav Variation, Torre System\",\"yzrf1szsj0\":\"A12|Réti Opening: Anglo-Slav Variation, Torre System\",\"3l5vpkv5h4\":\"A12|Réti Opening: Anglo-Slav Variation, Torre System\",\"20yko6sh1ic\":\"A12|Réti Opening: Anglo-Slav Variation, with dxc4\",\"ta06gcm8dv\":\"A13|English Opening: Agincourt Defense\",\"7eok6anq4r\":\"A13|English Opening: Agincourt Defense\",\"16nnaop07jl\":\"A13|English Opening: Agincourt Defense\",\"1ttxb5rs55e\":\"A13|English Opening: Agincourt Defense\",\"28a3gvju2rm\":\"A13|English Opening: Agincourt Defense\",\"m1civ35q5b\":\"A13|English Opening: Agincourt Defense, Bogoljubow Defense\",\"1z6y0hzg1uv\":\"A13|English Opening: Agincourt Defense, Catalan Defense\",\"16r5w6jcp0g\":\"A13|English Opening: Agincourt Defense, Catalan Defense\",\"127tlr40q5\":\"A13|English Opening: Agincourt Defense, Catalan Defense Accepted\",\"13c4gtncrie\":\"A13|English Opening: Agincourt Defense, Catalan Defense, Semi-Slav Defense\",\"1be662oc519\":\"A13|English Opening: Agincourt Defense, Kurajica Defense\",\"9ouzo1gd6m\":\"A13|English Opening: Agincourt Defense, Tarrasch Defense\",\"iy4s4zzi8t\":\"A13|English Opening: Agincourt Defense, Wimpy System\",\"dfkqoakqcc\":\"A13|English Opening: Neo-Catalan\",\"1st85qm5p47\":\"A13|English Opening: Neo-Catalan Declined\",\"1cafkx0kiu\":\"A13|English Opening: Romanishin Gambit\",\"54zrf3x340\":\"A14|English Opening: Agincourt Defense, Keres Defense\",\"uxma35km45\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined\",\"map7n79hxm\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined\",\"18gcfkrmiwk\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined\",\"2c0fvooohar\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined\",\"pwmo45bfq7\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined\",\"eca41z3db5\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined\",\"1a8w5e0s1dn\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined, Early b3\",\"266j981pdo2\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined, Early b3\",\"121ihi1sxks\":\"A14|English Opening: Agincourt Defense, Neo-Catalan Declined, Early b3\",\"1m19ct5jtqr\":\"A14|Réti Opening: Anglo-Slav Variation\",\"1geahnzw9sd\":\"A14|Réti Opening: Anglo-Slav Variation, Bogoljubow Variation, Stonewall Line\",\"17sox4f2uwy\":\"A15|English Opening: Anglo-Indian Defense\",\"2aw8awdclde\":\"A15|English Opening: Anglo-Indian Defense, Anti-Anti-Grünfeld\",\"2cujc4q2uyg\":\"A15|English Opening: Anglo-Indian Defense, Grünfeld Formation\",\"qm5c36vubz\":\"A15|English Opening: Anglo-Indian Defense, King's Indian Formation\",\"14jnior4v64\":\"A15|English Opening: Anglo-Indian Defense, King's Indian Formation, Double Fianchetto\",\"1kziff3hdnj\":\"A15|English Opening: Anglo-Indian Defense, King's Knight Variation\",\"1s4yzqyg47d\":\"A15|English Opening: Anglo-Indian Defense, Old Indian Formation\",\"117yc3uvcgf\":\"A15|English Opening: Anglo-Indian Defense, Queen's Indian Formation\",\"2f1ifom1h1\":\"A15|English Opening: Anglo-Indian Defense, Queen's Indian Formation\",\"69ggd60yiu\":\"A15|English Opening: Anglo-Indian Defense, Romanishin Variation\",\"1rj6x9eya9\":\"A15|English Opening: Anglo-Indian Defense, Scandinavian Defense\",\"9xnbew3kr7\":\"A15|English Opening: Anglo-Indian Defense, Scandinavian Defense, Exchange Variation\",\"9rer6nm2ib\":\"A15|English Opening: Anglo-Indian Defense, Slav Formation\",\"15palp7n3qb\":\"A15|English Orangutan\",\"104nwp3lepn\":\"A15|English Orangutan\",\"2gct3bilwjs\":\"A16|English Opening: Anglo-Grünfeld Defense\",\"202wj6tspfh\":\"A16|English Opening: Anglo-Grünfeld Defense, Korchnoi Variation\",\"2d6g67zckr8\":\"A16|English Opening: Anglo-Indian Defense, Anglo-Grünfeld Variation\",\"24tz25q594u\":\"A16|English Opening: Anglo-Indian Defense, Anglo-Grünfeld Variation\",\"1zklcvhbcps\":\"A16|English Opening: Anglo-Indian Defense, Anglo-Grünfeld Variation\",\"fmvfu2fq1o\":\"A16|English Opening: Anglo-Indian Defense, Anglo-Grünfeld Variation\",\"100e9xbgnrf\":\"A16|English Opening: Anglo-Indian Defense, Queen's Knight Variation\",\"569wr9c4tu\":\"A17|English Opening: Anglo-Indian Defense\",\"1o3rgtuea\":\"A17|English Opening: Anglo-Indian Defense, Hedgehog System\",\"lmwxp1pvs8\":\"A17|English Opening: Anglo-Indian Defense, Nimzo-English\",\"1m68kbp9pwy\":\"A17|English Opening: Anglo-Indian Defense, Queen's Indian Formation\",\"291uzpplexe\":\"A17|English Opening: Anglo-Indian Defense, Queen's Indian Variation\",\"bqnxm2geha\":\"A17|English Opening: Anglo-Indian Defense, Zvjaginsev-Krasenkow Attack\",\"1n5zqirj3ry\":\"A18|English Opening: Mikenas-Carls Variation\",\"277jv5iikgu\":\"A18|English Opening: Mikenas-Carls Variation\",\"20r1pdo7x2u\":\"A18|English Opening: Mikenas-Carls Variation\",\"19f1hter83s\":\"A19|English Opening: Anglo-Indian Defense, Flohr-Mikenas-Carls Variation, Nei Gambit\",\"p5nud159tr\":\"A19|English Opening: Mikenas-Carls, Sicilian\",\"zhrs24brsf\":\"A20|English Opening: Drill Variation\",\"o6rd0ikf1j\":\"A20|English Opening: King's English Variation\",\"2fhhqw11ohr\":\"A20|English Opening: King's English Variation, Kahiko-Hula Gambit\",\"3nq4g95muq\":\"A20|English Opening: King's English Variation, Nimzowitsch Variation\",\"2128ce0waqx\":\"A20|English Opening: King's English Variation, Nimzowitsch-Flohr Variation\",\"1z02lsc69jb\":\"A21|English Opening: King's English Variation\",\"18eqw8umdjn\":\"A21|English Opening: King's English Variation, Keres Defense\",\"1tmy5a52004\":\"A21|English Opening: King's English Variation, Kramnik-Shirov Counterattack\",\"10lmotiqfd9\":\"A21|English Opening: King's English Variation, Reversed Sicilian\",\"8x0bsfo6sr\":\"A21|English Opening: King's English Variation, Smyslov Defense\",\"dx05bzyhj\":\"A21|English Opening: King's English Variation, Troger Defense\",\"2fibyt2kzuu\":\"A22|English Opening: Carls-Bremen System\",\"13lqff6gilp\":\"A22|English Opening: King's English Variation, Adhiban Gambit\",\"1nyglq6d3eu\":\"A22|English Opening: King's English Variation, Bellon Gambit\",\"1ksa0ypkplw\":\"A22|English Opening: King's English Variation, Two Knights Variation\",\"50nqqe2e1w\":\"A22|English Opening: King's English Variation, Two Knights Variation, Reversed Dragon\",\"1o5iwwmhk6y\":\"A22|English Opening: King's English Variation, Two Knights Variation, Smyslov System\",\"22pgw2dcjqe\":\"A22|English Opening: King's English, Erbenheimer Gambit\",\"ye60fi4lzy\":\"A22|English Opening: King's English, Mazedonisch\",\"1e0ehvd8ks6\":\"A23|English Opening: King's English Variation, Two Knights Variation, Keres Variation\",\"1xw1vz0jrb3\":\"A23|English Opening: King's English Variation, Two Knights Variation, Keres Variation\",\"8l3yp7w5me\":\"A24|English Opening: King's English Variation, Two Knights Variation, Fianchetto Line\",\"2ce0a4x8qm1\":\"A25|English Opening: Closed, Taimanov Variation\",\"1swp8nm1103\":\"A25|English Opening: Closed, Taimanov Variation\",\"i3pj131c9a\":\"A25|English Opening: King's English Variation, Bremen-Hort Variation\",\"1efuizseek4\":\"A25|English Opening: King's English Variation, Closed System\",\"29y7ct272g3\":\"A25|English Opening: King's English Variation, Hungarian Attack\",\"1itsk723k2t\":\"A25|English Opening: King's English Variation, Reversed Closed Sicilian\",\"1ek99zmk6yn\":\"A25|English Opening: King's English Variation, Reversed Closed Sicilian\",\"13nor4f09m5\":\"A25|English Opening: King's English Variation, Reversed Closed Sicilian\",\"27p802uod7r\":\"A25|English Opening: King's English Variation, Reversed Closed Sicilian\",\"1qpb7nhvl6h\":\"A25|English Opening: King's English Variation, Reversed Closed Sicilian\",\"2a8kmacz9tv\":\"A25|English Opening: King's English Variation, Taimanov Variation\",\"1k1rhtrn9cd\":\"A26|English Opening: King's English Variation, Botvinnik System\",\"8ne1ocmyr6\":\"A26|English Opening: King's English Variation, Closed System, Full Symmetry\",\"23jhw5lxlno\":\"A27|English Opening: King's English Variation, Three Knights System\",\"16ggy2p04as\":\"A28|English Opening: Four Knights System, Nimzowitsch Variation\",\"270rt49765r\":\"A28|English Opening: King's English Variation, Four Knights Variation\",\"1umgwn2lr02\":\"A28|English Opening: King's English Variation, Four Knights Variation\",\"14ifbwr4396\":\"A28|English Opening: King's English Variation, Four Knights Variation, Bradley Beach Variation\",\"w39rdvpg09\":\"A28|English Opening: King's English Variation, Four Knights Variation, Flexible Line\",\"1t3fwjbnoth\":\"A28|English Opening: King's English Variation, Four Knights Variation, Korchnoi Line\",\"1lt4585kk6t\":\"A28|English Opening: King's English Variation, Four Knights Variation, Quiet Line\",\"one2weezzo\":\"A28|English Opening: King's English Variation, Four Knights Variation, Quiet Line\",\"1dcrf1uxhhz\":\"A28|English Opening: King's English Variation, Four Knights Variation, Quiet Line\",\"lfle6tcgnp\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line\",\"27hhkmsfap2\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line\",\"2fbky4z4c5r\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line\",\"gy7plezlgh\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line\",\"siuh85qomw\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line\",\"m18hgfw9fn\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line\",\"1v0r7w8zg1h\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, Delayed .. Nc6\",\"1dqgtmedsaz\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with .. d6\",\"1omhrcvh0an\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with .. d6\",\"16pmxuit0fq\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with .. d6, Be7\",\"15o19mqa0h8\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with .. d6, a6\",\"1sxw8tvtbq2\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with .. d6, h6\",\"ki4gu4ozxi\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with Bc5\",\"10men206k5b\":\"A29|English Opening: King's English Variation, Four Knights Variation, Fianchetto Line, with Nb6\",\"ewgyno9gcj\":\"A30|English Opening: Symmetrical Variation\",\"25mz71kjcr6\":\"A30|English Opening: Symmetrical Variation\",\"a26qsuvhwo\":\"A30|English Opening: Symmetrical Variation, Hedgehog Defense\",\"225sxx08sy8\":\"A30|English Opening: Symmetrical Variation, Napolitano Gambit\",\"a8s836x2ca\":\"A30|English Opening: Symmetrical, Hedgehog, Flexible Formation\",\"vbab747fbu\":\"A30|English Opening: Wing Gambit\",\"r0mbb39s6c\":\"A31|English Opening: Symmetrical Variation, Anti-Benoni Variation\",\"22nkyzu02ra\":\"A31|English Opening: Symmetrical Variation, Anti-Benoni Variation, Kasparov-Vaganian Gambit\",\"25tfbdbpzos\":\"A32|English Opening: Symmetrical Variation, Anti-Benoni Variation, Spielmann Defense\",\"1z2s57i71fh\":\"A33|English Opening: Symmetrical Variation, Anti-Benoni Variation, Geller Variation\",\"qvny5gjyzw\":\"A33|English Opening: Symmetrical Variation, Anti-Benoni Variation, Spielmann Defense\",\"18t7kcx4dez\":\"A34|English Opening: Symmetrical Variation\",\"5423uyjjvy\":\"A34|English Opening: Symmetrical Variation, Fianchetto Variation\",\"ox06mwd6xl\":\"A34|English Opening: Symmetrical Variation, Normal Variation\",\"dbxvwoiz1v\":\"A34|English Opening: Symmetrical Variation, Rubinstein Variation\",\"28tjc27ytch\":\"A34|English Opening: Symmetrical Variation, Rubinstein Variation\",\"1du59uw21n\":\"A34|English Opening: Symmetrical Variation, Three Knights Variation\",\"bp5ltt14ht\":\"A35|English Opening: Symmetrical Variation\",\"142ya63nrr5\":\"A35|English Opening: Symmetrical Variation, Four Knights Variation\",\"280utt87qh3\":\"A35|English Opening: Symmetrical Variation, Four Knights Variation, Keres-Parma System\",\"1z0hclo8dup\":\"A35|English Opening: Symmetrical Variation, Two Knights Variation\",\"17tis85seps\":\"A36|English Opening: Symmetrical Variation, Botvinnik System\",\"1oiomvw4hil\":\"A36|English Opening: Symmetrical Variation, Botvinnik System Reversed, with e3\",\"1p48f0jwkfk\":\"A36|English Opening: Symmetrical Variation, Two Knights, Fianchetto Variation\",\"21mejlck8sp\":\"A36|English Opening: Symmetrical Variation, Ultra-Symmetrical Variation\",\"1l0se5xalsk\":\"A37|English Opening: Symmetrical Variation, Botvinnik System Reversed, with Nf3\",\"92uph1rdkn\":\"A37|English Opening: Symmetrical Variation, Botvinnik System Reversed, with Nf3\",\"ro53wv0dje\":\"A37|English Opening: Symmetrical Variation, Botvinnik System Reversed, with Nf3\",\"1lchb37wpge\":\"A37|English Opening: Symmetrical Variation, Botvinnik System Reversed, with Nf3\",\"d13vprunxq\":\"A37|English Opening: Symmetrical Variation, Botvinnik System Reversed, with Nf3\",\"21oqwnuwxao\":\"A37|English Opening: Symmetrical Variation, Botvinnik System Reversed, with Nf3\",\"57ianch5fo\":\"A37|English Opening: Symmetrical Variation, Three Knights, Fianchetto Variation\",\"y0j4zuivvc\":\"A37|English Opening: Symmetrical Variation, Three Knights, Fianchetto Variation\",\"28zug6u06uk\":\"A37|English Opening: Symmetrical Variation, Three Knights, Fianchetto Variation\",\"1jd1joie59m\":\"A38|English Opening: Symmetrical Variation, Double Fianchetto\",\"gyv1jkisre\":\"A38|English Opening: Symmetrical Variation, Duchamp Variation\",\"21b50ls7deb\":\"A38|English Opening: Symmetrical Variation, Full Symmetry Line\",\"1ag9gc35azb\":\"A39|English Opening: Symmetrical Variation, Mecking Variation\",\"1fw3ov3p5c5\":\"A40|Australian Defense\",\"1c9nkmtfalz\":\"A40|Benoni Defense: Franco-Sicilian Hybrid\",\"avme4n3b4v\":\"A40|Borg Defense: Borg Gambit\",\"w9zz11eq2h\":\"A40|Colle System: Pterodactyl Variation\",\"2fxsoq9wj2n\":\"A40|Colle System: Siroccopteryx Variation\",\"7uw42qicgr\":\"A40|English Defense\",\"1stkd21jlvl\":\"A40|English Defense\",\"d739ggkcr\":\"A40|English Defense: Eastbourne Gambit\",\"1lmadocorzl\":\"A40|English Defense: Hartlaub Gambit Accepted\",\"14q9yzrj4z4\":\"A40|English Defense: Hartlaub Gambit Declined\",\"1z26toaynt5\":\"A40|English Defense: Perrin Variation\",\"rzk8abz3mk\":\"A40|English Defense: Poli Gambit\",\"5r5hwiuwpl\":\"A40|Englund Gambit\",\"1iuz60kkkd3\":\"A40|Englund Gambit Declined\",\"2as599liz8q\":\"A40|Englund Gambit Declined: Diemer Counterattack\",\"2gkpop4qlzg\":\"A40|Englund Gambit Declined: Reversed Alekhine\",\"4bemlunbqy\":\"A40|Englund Gambit Declined: Reversed Brooklyn\",\"a2vuvz4zlx\":\"A40|Englund Gambit Declined: Reversed French\",\"2d65mnfinot\":\"A40|Englund Gambit Declined: Reversed Krebs\",\"161281b8rh0\":\"A40|Englund Gambit Declined: Reversed Mokele Mbembe\",\"1n7p7y2x2q8\":\"A40|Englund Gambit: Felbecker Gambit\",\"1uf5jcnrva2\":\"A40|Englund Gambit: Hartlaub-Charlick Gambit\",\"16h034c4l25\":\"A40|Englund Gambit: Main Line\",\"1crmh2qxhjv\":\"A40|Englund Gambit: Mosquito Gambit\",\"etcpb524fr\":\"A40|Englund Gambit: Soller Gambit\",\"1qype1a8ynx\":\"A40|Englund Gambit: Soller Gambit Deferred\",\"233r1hh06o3\":\"A40|Englund Gambit: Stockholm Variation\",\"1ut6efsh672\":\"A40|Englund Gambit: Zilbermints Gambit\",\"bfkanidme0\":\"A40|Horwitz Defense\",\"2gejc1nu47o\":\"A40|Horwitz Defense: Zilbermints Gambit\",\"10kjptwdmor\":\"A40|Kangaroo Defense\",\"sr6gwtqg1w\":\"A40|Kangaroo Defense: Keres Defense, Transpositional Variation\",\"fltkcq1iok\":\"A40|Mikenas Defense\",\"1en73861i63\":\"A40|Mikenas Defense: Cannstatter Variation\",\"162sjk137bb\":\"A40|Mikenas Defense: Lithuanian Variation\",\"1srry3ovpqd\":\"A40|Mikenas Defense: Pozarek Gambit\",\"1usf8a6dkjm\":\"A40|Modern Defense: Beefeater Variation\",\"1mqnpn1it8h\":\"A40|Modern Defense: Lizard Defense, Pirc-Diemer Gambit\",\"ftb2an6eh3\":\"A40|Montevideo Defense\",\"d6bvdhd4r1\":\"A40|Polish Defense\",\"6utdpi2d54\":\"A40|Polish Defense: Spassky Gambit Accepted\",\"1bf7pw45oit\":\"A40|Pterodactyl Defense: Central, Benoni Beefeater Pterodactyl\",\"2e0a3ny17mh\":\"A40|Pterodactyl Defense: Central, Benoni Pterodactyl\",\"3v7nnhi0cb\":\"A40|Pterodactyl Defense: Fianchetto, Queen Benoni Pterodactyl\",\"1kp4lnfopeq\":\"A40|Pterodactyl Defense: Fianchetto, Queen Pteranodon\",\"1o6jw2xryp4\":\"A40|Pterodactyl Defense: Fianchetto, Queen Pterodactyl\",\"29zej3oe0oz\":\"A40|Pterodactyl Defense: Queen Pterodactyl, Quiet Line\",\"2a9k9e5qe3t\":\"A40|Queen's Pawn Game\",\"25c39ff75yb\":\"A40|Queen's Pawn Game: Anglo-Slav Opening\",\"g25wij0ec7\":\"A40|Queen's Pawn Game: Modern Defense\",\"23yzk1g4hai\":\"A40|Slav Indian: Kudischewitsch Gambit\",\"2e6o02v399e\":\"A40|Zaire Defense\",\"2g6jyeu0c4b\":\"A41|Modern Defense\",\"12bj5gsm5dg\":\"A41|Modern Defense: Neo-Modern Defense\",\"1hfx8jl7nbc\":\"A41|Old Indian Defense\",\"1vkfqco1kb7\":\"A41|Queen's Pawn Game\",\"wg82i55be1\":\"A41|Queen's Pawn Game: Rossolimo Variation\",\"drgqea0kzw\":\"A41|Rat Defense: English Rat\",\"1rq43cls8dw\":\"A41|Rat Defense: English Rat, Lisbon Gambit\",\"1qfg6wjimag\":\"A41|Rat Defense: English Rat, Pounds Gambit\",\"11cthks437l\":\"A41|Robatsch Defense: Rossolimo Variation\",\"1p8osa2zy7p\":\"A41|Wade Defense\",\"ii5ze7rvo9\":\"A41|Zukertort Opening: Wade Defense, Chigorin Plan\",\"1aplvzc5ole\":\"A42|Modern Defense: Averbakh System\",\"i2bva5g7c2\":\"A42|Modern Defense: Averbakh Variation, Pseudo-Sämisch\",\"10nhbel72aa\":\"A42|Modern Defense: Kotov Variation\",\"2bt4wfysfva\":\"A42|Modern Defense: Randspringer Variation\",\"sf4yls50ai\":\"A42|Pterodactyl Defense\",\"23jsmf1k3np\":\"A42|Pterodactyl Defense: Central, Bogolubovia\",\"wbq1gpg9ql\":\"A43|Benoni Defense: Benoni Gambit Accepted\",\"w8r9oa1zrj\":\"A43|Benoni Defense: Benoni Gambit, Schlenker Defense\",\"nw4wq9dwzq\":\"A43|Benoni Defense: Benoni-Indian Defense\",\"281rca27a7o\":\"A43|Benoni Defense: Benoni-Indian Defense, Kingside Move Order\",\"20wr2xq0nmj\":\"A43|Benoni Defense: Benoni-Staunton Gambit\",\"2omd11uytb\":\"A43|Benoni Defense: Cormorant Gambit\",\"1bqce4un4gs\":\"A43|Benoni Defense: French Benoni\",\"au8w4jyhe\":\"A43|Benoni Defense: Hawk Variation\",\"2eo7gvurs4\":\"A43|Benoni Defense: Old Benoni\",\"1t37rq67582\":\"A43|Benoni Defense: Old Benoni\",\"ci3n3d2gcy\":\"A43|Benoni Defense: Old Benoni\",\"gawnjzje8k\":\"A43|Benoni Defense: Old Benoni, Mujannah Formation\",\"4p7is8uq1r\":\"A43|Benoni Defense: Old Benoni, Schmid Variation\",\"jufo8w1hb1\":\"A43|Benoni Defense: Snail Variation\",\"lfeebabimv\":\"A43|Benoni Defense: Woozle\",\"10ic9w7i1ho\":\"A43|Benoni Defense: Zilbermints-Benoni Gambit\",\"1ajzruu0nnq\":\"A43|Benoni Defense: Zilbermints-Benoni Gambit\",\"1qnvbsyp9j\":\"A43|Benoni Defense: Zilbermints-Benoni Gambit, Tamarkin Countergambit\",\"1rkk0vf81ap\":\"A43|Indian Defense: Pseudo-Benko\",\"23c1qc7k7f1\":\"A43|Queen's Pawn Game: Liedmann Gambit\",\"ryjyiu11d7\":\"A44|Benoni Defense: Old Benoni\",\"abgn4ijlwc\":\"A44|Benoni Defense: Semi-Benoni\",\"835golqlol\":\"A45|Amazon Attack: Siberian Attack\",\"g10su608mc\":\"A45|Basque Opening\",\"28iskmp9xxs\":\"A45|Canard Opening\",\"276g9pjngh2\":\"A45|Indian Defense\",\"294oecrf161\":\"A45|Indian Defense: Accelerated London System\",\"1s1o22a9pm\":\"A45|Indian Defense: Gedult Attack\",\"qk8xm0s67y\":\"A45|Indian Defense: Gibbins-Weidenhagen Gambit\",\"1h975fgzitb\":\"A45|Indian Defense: Gibbins-Weidenhagen Gambit Accepted\",\"jkkoo4t55y\":\"A45|Indian Defense: Gibbins-Weidenhagen Gambit, Maltese Falcon\",\"1jl65gogkj\":\"A45|Indian Defense: Gibbins-Weidenhagen Gambit, Oshima Defense\",\"2gg30cf0hjy\":\"A45|Indian Defense: Gibbins-Weidenhagen Gambit, Stummer Gambit\",\"zqwljrvzgj\":\"A45|Indian Defense: Lazard Gambit\",\"kewvsx4q4g\":\"A45|Indian Defense: Maddigan Gambit\",\"2ndd47vzlv\":\"A45|Indian Defense: Omega Gambit\",\"1h8r1tomcoc\":\"A45|Indian Defense: Omega Gambit, Arafat Gambit\",\"26ver9v0l3q\":\"A45|Indian Defense: Paleface Attack, Blackmar-Diemer Gambit Deferred\",\"17opta1idhr\":\"A45|Indian Defense: Pawn Push Variation\",\"5l3935se59\":\"A45|Indian Defense: Reversed Chigorin Defense\",\"13uues3jaqi\":\"A45|Indian Defense: Tartakower Attack\",\"2fo5plkyvlc\":\"A45|Paleface Attack\",\"4ej9c2e3ck\":\"A45|Queen's Pawn Game: Chigorin Variation\",\"1hta51p5tf3\":\"A45|Queen's Pawn Game: Veresov, Richter Attack\",\"cm237j27op\":\"A45|Trompowsky Attack\",\"1ane3iyqkcm\":\"A45|Trompowsky Attack: Borg Variation\",\"gygeucpwl1\":\"A45|Trompowsky Attack: Classical Defense\",\"2g7lzznwwux\":\"A45|Trompowsky Attack: Classical Defense, Big Center Variation\",\"27d6s4iwdp3\":\"A45|Trompowsky Attack: Edge Variation\",\"28hk8mtyngc\":\"A45|Trompowsky Attack: Edge Variation, Hergert Gambit\",\"zp2p4p2np6\":\"A45|Trompowsky Attack: Edge Variation, Hergert Gambit\",\"1y56eaah7a\":\"A45|Trompowsky Attack: Poisoned Pawn Variation\",\"1y3mys597o0\":\"A45|Trompowsky Attack: Raptor Variation\",\"12lxtbltmb3\":\"A45|Trompowsky Attack: Raptor Variation, Hergert Gambit\",\"2ao8c18hbs0\":\"A46|Döry Defense\",\"28smf41qrf\":\"A46|Indian Defense: Czech-Indian\",\"grygg8r3qk\":\"A46|Indian Defense: Knights Variation\",\"1yxpzv5v75w\":\"A46|Indian Defense: Knights Variation, Alburt-Miles Variation\",\"1xd8th9es7h\":\"A46|Indian Defense: London System\",\"1ujpu1ve38l\":\"A46|Indian Defense: Polish Variation\",\"2awmnja56d8\":\"A46|Indian Defense: Spielmann-Indian\",\"2frpbrlsm08\":\"A46|Indian Defense: Wade-Tartakower Defense\",\"brca2py5p\":\"A46|Queen's Pawn Game: Torre Attack, Breyer Variation\",\"16s380ddz3d\":\"A46|Queen's Pawn Game: Veresov Attack, Classical Defense\",\"jue3iyjm6r\":\"A46|Torre Attack: Classical Defense\",\"1hxpagqkyds\":\"A46|Torre Attack: Classical Defense, Nimzowitsch Variation\",\"92ky8jkrb4\":\"A46|Torre Attack: Classical Defense, Petrosian Gambit\",\"fr548pxxii\":\"A46|Torre Attack: Wagner Gambit\",\"ro2bywelmn\":\"A46|Yusupov-Rubinstein System\",\"1jnk249f3vr\":\"A47|Indian Defense: Schnepper Gambit\",\"123rzh2dgj2\":\"A47|Marienbad System\",\"onyd6exhoi\":\"A47|Marienbad System: Berg Variation\",\"2a2omz65i5k\":\"A47|Pseudo Queen's Indian Defense\",\"1hq6dkfggvi\":\"A47|Pseudo Queen's Indian Defense\",\"25z8267jrhd\":\"A48|East Indian Defense\",\"1amz95no6r8\":\"A48|Indian Defense: Colle System, King's Indian Variation\",\"1bd64ggqdo2\":\"A48|London System\",\"py1qcjwra6\":\"A48|London System\",\"ivmc8ssvrb\":\"A48|London System\",\"2964hiv5dys\":\"A48|London System, with Bd3\",\"16wyqa889bf\":\"A48|London System, with Be2\",\"1a70tjows99\":\"A48|London System, with Be2\",\"5tbwnatuwx\":\"A48|London System, with Be2\",\"1im82lcioj7\":\"A48|Queen's Pawn Game: Barry Attack\",\"6dylds2fop\":\"A48|Queen's Pawn Game: Barry Attack\",\"15pq085nxlk\":\"A48|Queen's Pawn Game: Barry Attack, Grünfeld Variation\",\"12eokh72j8h\":\"A48|Queen's Pawn Game: Barry Attack, Tarzan Attack\",\"escz3b2eqr\":\"A48|Queen's Pawn Game: Torre Attack, Grünfeld Variation, Main Line\",\"25nls1n8bv1\":\"A48|Torre Attack: Fianchetto Defense\",\"mod70vhxe\":\"A48|Torre Attack: Fianchetto Defense, Euwe Variation\",\"p4o4x0qlcj\":\"A49|Indian Defense: Przepiorka Variation\",\"x09wnq7ap1\":\"A50|Indian Defense: Medusa Gambit\",\"1oeuwgg0ce3\":\"A50|Indian Defense: Normal Variation\",\"1on0yh2mdry\":\"A50|Indian Defense: Pyrenees Gambit\",\"1pp2pdh369w\":\"A50|Mexican Defense\",\"3eicir68x0\":\"A50|Mexican Defense: Horsefly Gambit\",\"23v6yqpxx6a\":\"A50|Queen's Indian Accelerated\",\"1mgd7qbkk7y\":\"A50|Slav Indian\",\"19gduogpe0m\":\"A51|Indian Defense: Budapest Gambit\",\"14veecmhuin\":\"A51|Indian Defense: Budapest Gambit Accepted\",\"178m4vb2eh8\":\"A51|Indian Defense: Budapest Gambit Accepted, Fajarowicz Defense\",\"j095ewthlx\":\"A51|Indian Defense: Budapest Gambit Accepted, Fajarowicz Defense, Bonsdorf Variation\",\"2g5mg0uo0mp\":\"A51|Indian Defense: Budapest Gambit Accepted, Fajarowicz Defense, Steiner Variation\",\"1ywxhvi5a7e\":\"A52|Indian Defense: Budapest Gambit Accepted, Main Line\",\"1fmgfjsmtkz\":\"A52|Indian Defense: Budapest Gambit Accepted, Main Line, Adler Variation\",\"zj1c1q01om\":\"A52|Indian Defense: Budapest Gambit Accepted, Main Line, Alekhine Variation\",\"1wn2206typm\":\"A52|Indian Defense: Budapest Gambit Accepted, Main Line, Alekhine Variation, Abonyi Variation\",\"k8exq13i0i\":\"A52|Indian Defense: Budapest Gambit Accepted, Main Line, Alekhine Variation, Tartakower Defense\",\"m9ly21u4tu\":\"A52|Indian Defense: Budapest Gambit Accepted, Main Line, Rubinstein Variation\",\"966tbp1mwn\":\"A53|Old Indian Defense\",\"pu278xcrew\":\"A53|Old Indian Defense: Aged Gibbon Gambit\",\"1wisllnrda4\":\"A53|Old Indian Defense: Czech Variation, with Nc3\",\"1k4nzvxepxg\":\"A53|Old Indian Defense: Czech Variation, with Nf3\",\"j4iw9muru1\":\"A53|Old Indian Defense: Janowski Variation\",\"1egsq2izrvd\":\"A53|Old Indian Defense: Janowski Variation, Fianchetto Variation\",\"zewnky32ao\":\"A53|Old Indian Defense: Janowski Variation, Grinberg Gambit\",\"iotzo2tzdl\":\"A53|Old Indian Defense: Janowski Variation, Main Line\",\"20nyoz1h2aj\":\"A54|Old Indian Defense: Duz-Khotimirsky Variation\",\"1ljip8hag10\":\"A54|Old Indian Defense: Tartakower-Indian\",\"1ug6szndrzf\":\"A54|Old Indian Defense: Two Knights Variation\",\"ted7rn9ezo\":\"A54|Old Indian Defense: Ukrainian Variation\",\"14489ddol3\":\"A55|Old Indian Defense: Normal Variation\",\"754qwazrb5\":\"A56|Benoni Defense\",\"1w7y4vazbna\":\"A56|Benoni Defense: Czech Benoni Defense\",\"2a6695fjldy\":\"A56|Benoni Defense: Hromádka System\",\"83zazaei2s\":\"A56|Benoni Defense: King's Indian System\",\"1cnkjo8zx3m\":\"A56|Benoni Defense: Weenink Variation\",\"2ciepb3rga9\":\"A56|Grünfeld Defense: Three Knights Variation, Burille Variation, Reversed Tarrasch\",\"gm8q6vcvor\":\"A56|Vulture Defense\",\"eg9stenu2y\":\"A57|Benko Gambit\",\"1erm28ad2l8\":\"A57|Benko Gambit Accepted\",\"2ck9nelrq5b\":\"A57|Benko Gambit Accepted: Dlugy Variation\",\"13la9lbk83d\":\"A57|Benko Gambit Accepted: Modern Variation\",\"1lgkcyqnhw1\":\"A57|Benko Gambit Accepted: Pawn Return Variation\",\"21zj0ld766v\":\"A57|Benko Gambit Declined: Bishop Attack\",\"1dgszhbjzhj\":\"A57|Benko Gambit Declined: Hjørring Countergambit\",\"1i8vo303dxl\":\"A57|Benko Gambit Declined: Main Line\",\"9mt7e6nj6u\":\"A57|Benko Gambit Declined: Pseudo-Sämisch\",\"o44okgj3xz\":\"A57|Benko Gambit Declined: Quiet Line\",\"14p2zd52lvx\":\"A57|Benko Gambit Declined: Sosonko Variation\",\"pavf3d6u73\":\"A57|Benko Gambit: Mutkin Countergambit\",\"1kihg7rr9xr\":\"A57|Benko Gambit: Nescafe Frappe Attack\",\"1qvmsqazo2\":\"A57|Benko Gambit: Zaitsev System\",\"277ykozk80a\":\"A57|Benko Gambit: Zaitsev Variation, Nescafe Frappe Attack\",\"20iatf8b4bw\":\"A58|Benko Gambit Accepted: Central Storming Variation\",\"1xz1d64rc5i\":\"A58|Benko Gambit Accepted: Fianchetto Variation\",\"q0f28oklpf\":\"A58|Benko Gambit Accepted: Fully Accepted Variation\",\"h8k7xqcdjh\":\"A58|Benko Gambit: Fianchetto Variation\",\"zmezmojtcy\":\"A58|Benko Gambit: Nd2 Variation\",\"5qegmjb8mq\":\"A59|Benko Gambit\",\"3oubcd69vb\":\"A59|Benko Gambit Accepted: King Walk Variation\",\"14bng2fl6os\":\"A59|Benko Gambit Accepted: Yugoslav\",\"20y0ajosi1u\":\"A59|Benko Gambit Accepted: Yugoslav\",\"14nep7v5217\":\"A60|Benoni Defense: Modern Variation\",\"7fx1ony02u\":\"A60|Benoni Defense: Modern Variation, Snake Variation\",\"y287qycnxx\":\"A61|Benoni Defense\",\"81yqt2ynqz\":\"A61|Benoni Defense: Fianchetto Variation\",\"2ah5tsczcs6\":\"A61|Benoni Defense: Knight's Tour Variation\",\"ks17uof4n0\":\"A61|Benoni Defense: Uhlmann Variation\",\"e8u211vtoz\":\"A62|Benoni Defense: Fianchetto Variation\",\"1z9xdbhfmod\":\"A63|Benoni Defense: Fianchetto Variation, Hastings Defense\",\"otxlpisxbj\":\"A64|Benoni Defense: Fianchetto Variation, Hastings Defense, Main Line\",\"1723v1v0jwo\":\"A65|Benoni Defense: King's Pawn Line\",\"16le19x417n\":\"A65|Benoni Defense: King's Pawn Line\",\"6i2k6fjuff\":\"A65|Benoni Defense: King's Pawn Line\",\"87wjqhjhqg\":\"A65|Benoni Defense: King's Pawn Line, with Be3\",\"dav4bkw1w9\":\"A65|Benoni Defense: King's Pawn Line, with Bg5\",\"wlrzo5fod8\":\"A65|Benoni Defense: King's Pawn Line, with Bg5\",\"1daq7o9c4ej\":\"A65|Benoni Defense: King's Pawn Line, with Bg5\",\"1l2me9zwq5d\":\"A65|Benoni Defense: King's Pawn Line, with Nge2\",\"203yac0pff4\":\"A65|Benoni Defense: King's Pawn Line, with Nge2\",\"dstjjyy2zp\":\"A66|Benoni Defense: Mikenas Variation\",\"1k7km3xjgbw\":\"A66|Benoni Defense: Pawn Storm Variation\",\"1masx7a339r\":\"A67|Benoni Defense: Taimanov Variation\",\"vcl7s1p6ao\":\"A68|Benoni Defense: Four Pawns Attack\",\"tc76y4efei\":\"A68|Benoni Defense: Four Pawns Attack\",\"x03ce8og7z\":\"A69|Benoni Defense: Four Pawns Attack, Main Line\",\"2c9aks44svd\":\"A69|Benoni Defense: Four Pawns Attack, Main Line\",\"1gh7wdpis8o\":\"A69|Benoni Defense: Four Pawns Attack, Main Line\",\"c8s2se7vds\":\"A69|Benoni Defense: Four Pawns Attack, Main Line\",\"uek4jgy8vs\":\"A70|Benoni Defense: Classical Variation\",\"l8dvu1gctu\":\"A70|Benoni Defense: Classical Variation, New York Variation\",\"139rh94b61o\":\"A70|Benoni Defense: Classical Variation, Traditional Variation\",\"1n4vvevujkv\":\"A71|Benoni Defense: Classical Variation, Averbakh-Grivas Attack\",\"25mk1pzu3m2\":\"A72|Benoni Defense: Classical Variation\",\"bg2k37dkg3\":\"A73|Benoni Defense: Classical Variation, Main Line\",\"21m3ql3eigx\":\"A74|Benoni Defense: Classical Variation, Full Line\",\"1pbvlbhd55r\":\"A75|Benoni Defense: Classical Variation, Argentine Counterattack\",\"1wr5nssoc3p\":\"A76|Benoni Defense: Classical Variation, Czerniak Defense\",\"1wmh300p5mb\":\"A77|Benoni Defense: Classical Variation, Czerniak Defense, Tal Line\",\"34qycm0nux\":\"A77|Benoni Defense: Classical Variation, Czerniak Defense, Tal Line\",\"1gwxkstwoxo\":\"A78|Benoni Defense: Classical Variation, Czerniak Defense\",\"12exyfoern9\":\"A79|Benoni Defense: Classical Variation, Czerniak Defense\",\"27zz0qz3kke\":\"A80|Dutch Defense\",\"45caelvttp\":\"A80|Dutch Defense: Alapin Variation\",\"1tzi3cruasd\":\"A80|Dutch Defense: Barcza Variation\",\"1rv8f9u1bbe\":\"A80|Dutch Defense: Hevendehl Gambit\",\"267ykiv803x\":\"A80|Dutch Defense: Hopton Attack\",\"c9sc3yxyra\":\"A80|Dutch Defense: Janzen-Korchnoi Gambit\",\"7hsij8g9z8\":\"A80|Dutch Defense: Kingfisher Gambit\",\"xosgo7e5p0\":\"A80|Dutch Defense: Korchnoi Attack\",\"12afvsccudz\":\"A80|Dutch Defense: Krejcik Gambit\",\"i0ijzew07y\":\"A80|Dutch Defense: Krejcik Gambit, Tate Gambit\",\"1xq3pijnwfw\":\"A80|Dutch Defense: Manhattan Gambit, Anti-Classical Line\",\"12rg2g4vjyo\":\"A80|Dutch Defense: Manhattan Gambit, Anti-Leningrad\",\"4odvvd71ob\":\"A80|Dutch Defense: Manhattan Gambit, Anti-Modern\",\"7e94f6dcy9\":\"A80|Dutch Defense: Manhattan Gambit, Anti-Stonewall\",\"27b5twu7tpn\":\"A80|Dutch Defense: Omega-Isis Gambit\",\"1tw728v2wxt\":\"A80|Dutch Defense: Raphael Variation\",\"1w23eeugj8y\":\"A80|Dutch Defense: Senechaud Gambit\",\"xk3ailykd6\":\"A80|Dutch Defense: Spielmann Gambit\",\"1ocljdlw9y7\":\"A80|Queen's Pawn Game: Veresov Attack, Dutch System\",\"1hzaf7zhw60\":\"A81|Dutch Defense: Blackburne Variation\",\"1koc7zvq181\":\"A81|Dutch Defense: Fianchetto Attack\",\"1wl0m5kb0ya\":\"A81|Dutch Defense: Leningrad Variation, Carlsbad Variation\",\"1q33ybexz1d\":\"A81|Dutch Defense: Leningrad, Basman System\",\"2fv2ux71by6\":\"A81|Dutch Defense: Semi-Leningrad Variation\",\"19e8m3ezjck\":\"A82|Dutch Defense: Blackmar's Second Gambit\",\"wl1shg7q8m\":\"A82|Dutch Defense: Staunton Gambit\",\"g3dxd0k5cg\":\"A82|Dutch Defense: Staunton Gambit Accepted\",\"2etgw0yjojv\":\"A82|Dutch Defense: Staunton Gambit, American Attack\",\"2ckztaxt275\":\"A82|Dutch Defense: Staunton Gambit, Tartakower Variation\",\"lh8nd294fa\":\"A82|Rat Defense: Balogh Defense\",\"aehihs6j2g\":\"A83|Dutch Defense: Staunton Gambit\",\"d7bosw9m18\":\"A83|Dutch Defense: Staunton Gambit, Alekhine Variation\",\"gx3fjksv9v\":\"A83|Dutch Defense: Staunton Gambit, Chigorin Variation\",\"17q2o6j2s4t\":\"A83|Dutch Defense: Staunton Gambit, Lasker Variation\",\"2chob4s7ru9\":\"A83|Dutch Defense: Staunton Gambit, Nimzowitsch Variation\",\"bp3iqv13ok\":\"A84|Dutch Defense\",\"18l0peb65eo\":\"A84|Dutch Defense: Bellon Gambit\",\"w6gzv9loyc\":\"A84|Dutch Defense: Bladel Variation\",\"6zcxvf17bc\":\"A84|Dutch Defense: Classical Variation\",\"jeofxwq0yi\":\"A84|Dutch Defense: Krause Variation\",\"26c88inkpik\":\"A84|Dutch Defense: Normal Variation\",\"27nojn7d47i\":\"A84|Dutch Defense: Rubinstein Variation\",\"17hf6nzcxt4\":\"A85|Dutch Defense: Queen's Knight Variation\",\"4oxd8ffyjm\":\"A86|Dutch Defense: Fianchetto Variation\",\"mdv745po90\":\"A86|Dutch Defense: Hort-Antoshin System\",\"1baqclfjrkb\":\"A86|Dutch Defense: Leningrad Variation\",\"m705du9car\":\"A87|Dutch Defense: Leningrad Variation\",\"144ihcggao4\":\"A88|Dutch Defense: Leningrad Variation, Warsaw Variation\",\"1nciatwmig2\":\"A89|Dutch Defense: Leningrad Variation, Matulovic Variation\",\"1fnjlbju2a7\":\"A90|Dutch Defense: Classical Variation\",\"1jtpnxuwqeq\":\"A90|Dutch Defense: Classical Variation\",\"1mnq9w8dcj2\":\"A90|Dutch Defense: Nimzo-Dutch Variation\",\"qz1vf7fap\":\"A90|Dutch Defense: Nimzo-Dutch Variation, Alekhine Variation\",\"1w3tm1yjlo2\":\"A90|Dutch Defense: Stonewall Variation, Modern Variation\",\"83qz85y0lg\":\"A91|Dutch Defense: Classical Variation\",\"8w0tneu9rt\":\"A91|Dutch Defense: Classical Variation, Blackburne Attack\",\"1rxlxnq3y1d\":\"A92|Dutch Defense: Alekhine Variation\",\"7v4msatf9d\":\"A92|Dutch Defense: Classical Variation\",\"11g96qvef48\":\"A92|Dutch Defense: Stonewall Variation\",\"150lm44r300\":\"A92|Dutch Defense: Stonewall Variation\",\"1rj5rvpvlxs\":\"A93|Dutch Defense: Stonewall Variation, Botvinnik Variation\",\"1fpkhkpsl57\":\"A94|Dutch Defense: Stonewall Variation\",\"1vg3c6nr8hd\":\"A95|Dutch Defense: Stonewall Variation\",\"oydhv674sq\":\"A95|Dutch Defense: Stonewall Variation, Chekhover Variation\",\"ovbeyjr1l9\":\"A96|Dutch Defense: Classical Variation\",\"2gbw6sol6h0\":\"A96|Dutch Defense: Classical Variation, Buenos Aires Variation\",\"kt68tp4iua\":\"A96|Dutch Defense: Classical Variation, Huisl Variation\",\"24czfs252mt\":\"A97|Dutch Defense: Classical Variation, Ilyin-Zhenevsky Variation\",\"5q96kkykkx\":\"A97|Dutch Defense: Classical Variation, Ilyin-Zhenevsky Variation, Winter Variation\",\"1iqcp2dsbtc\":\"A98|Dutch Defense: Classical Variation, Ilyin-Zhenevsky Variation, Alatortsev-Lisitsyn Line\",\"tvfero0gg7\":\"A99|Dutch Defense: Classical Variation, Ilyin-Zhenevsky Variation, Modern Main Line\",\"1zp54mfwm5k\":\"B00|Barnes Defense\",\"1anucl721sy\":\"B00|Borg Defense\",\"h6x0hmeqyd\":\"B00|Borg Defense: Borg Gambit\",\"4phlw0f921\":\"B00|Borg Defense: Troon Gambit\",\"uwolmtb55a\":\"B00|Borg Defense: Zilbermints Gambit\",\"phamvqg6mo\":\"B00|Carr Defense\",\"22shae8x0gj\":\"B00|Carr Defense: Zilbermints Gambit\",\"17ppsupb2v3\":\"B00|Duras Gambit\",\"24kgihtlho9\":\"B00|Fried Fox Defense\",\"9z4om8eeu1\":\"B00|Goldsmith Defense\",\"2b5ncl323hc\":\"B00|Goldsmith Defense: Picklepuss Defense\",\"1ggead7r5n8\":\"B00|Hippopotamus Defense\",\"217p2fcvchc\":\"B00|Hippopotamus Defense\",\"27vwrmy2i3d\":\"B00|King's Pawn Game\",\"k7x2abkcx5\":\"B00|Lemming Defense\",\"4a276e93vh\":\"B00|Lion Defense: Lion's Jaw\",\"1oo2rf8bkha\":\"B00|Nimzowitsch Defense\",\"14d8sgpc9et\":\"B00|Nimzowitsch Defense\",\"9nldsgxwu\":\"B00|Nimzowitsch Defense: Breyer Variation\",\"gyq36nfprm\":\"B00|Nimzowitsch Defense: Colorado Countergambit\",\"11d59mevuyj\":\"B00|Nimzowitsch Defense: Colorado Countergambit Accepted\",\"1072c0uck2b\":\"B00|Nimzowitsch Defense: Declined Variation\",\"1j7f9355rpd\":\"B00|Nimzowitsch Defense: El Columpio Defense\",\"2euknw64tzu\":\"B00|Nimzowitsch Defense: El Columpio Defense, El Columpio Gambit\",\"1gn5s45n9gb\":\"B00|Nimzowitsch Defense: El Columpio Defense, Exchange Variation\",\"2anucabirhd\":\"B00|Nimzowitsch Defense: El Columpio Defense, Pin Variation\",\"tt9rxb978k\":\"B00|Nimzowitsch Defense: Franco-Nimzowitsch Variation\",\"nlscr3izy6\":\"B00|Nimzowitsch Defense: French Connection\",\"bqssjsf8g1\":\"B00|Nimzowitsch Defense: Hornung Gambit\",\"n52n55mha8\":\"B00|Nimzowitsch Defense: Kennedy Variation\",\"n8g0qgookz\":\"B00|Nimzowitsch Defense: Kennedy Variation, Bielefelder Gambit\",\"1hzfrdbzowo\":\"B00|Nimzowitsch Defense: Kennedy Variation, Hammer Gambit\",\"1hd2hadn8fn\":\"B00|Nimzowitsch Defense: Kennedy Variation, Herford Gambit\",\"16aa23fsp28\":\"B00|Nimzowitsch Defense: Kennedy Variation, Keres Attack\",\"1rmbkrloxfh\":\"B00|Nimzowitsch Defense: Kennedy Variation, Linksspringer Variation\",\"18op8bzm5yg\":\"B00|Nimzowitsch Defense: Kennedy Variation, Main Line\",\"1tjbhdnqjj4\":\"B00|Nimzowitsch Defense: Kennedy Variation, Paulsen Attack\",\"cmlkve9r2a\":\"B00|Nimzowitsch Defense: Kennedy Variation, Riemann Defense\",\"yeqnu0rqs1\":\"B00|Nimzowitsch Defense: Kennedy Variation, de Smet Gambit\",\"1llcn2d45q6\":\"B00|Nimzowitsch Defense: Mikenas Variation\",\"rkyfig5lbg\":\"B00|Nimzowitsch Defense: Neo-Mongoloid Defense\",\"sctomtqrkk\":\"B00|Nimzowitsch Defense: Pirc Connection\",\"28pbzeyrhup\":\"B00|Nimzowitsch Defense: Pseudo-Spanish Variation\",\"118r98bjtr1\":\"B00|Nimzowitsch Defense: Scandinavian Variation\",\"sielvnheca\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Aachen Gambit\",\"1c2jdn0wabu\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Advance Variation\",\"1s3rkpnx3zc\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation\",\"58yvcur1p4\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation\",\"kxjzqrqnk2\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation, Brandics Gambit\",\"1t0k26ii3pm\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation, Erben Gambit\",\"1q2gunbemwb\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation, Heinola-Deppe Gambit\",\"18oyrtsxgaq\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation, Nimzowitsch Gambit\",\"36velzdzle\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation, Richter Gambit\",\"1bf7to684oa\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Bogoljubow Variation, Vehre Variation\",\"13ekffcx4lx\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Exchange Variation\",\"1vn277and5t\":\"B00|Nimzowitsch Defense: Scandinavian Variation, Exchange Variation, Marshall Gambit\",\"prkrq4mklb\":\"B00|Nimzowitsch Defense: Wheeler Gambit\",\"zf6t9zua3v\":\"B00|Nimzowitsch Defense: Williams Variation\",\"1c90s5eqaia\":\"B00|Nimzowitsch Defense: Woodchuck Variation\",\"om9lu0n9s6\":\"B00|Owen Defense\",\"mpcqsy43y\":\"B00|Owen Defense: Guatemala Defense\",\"uzezq11wd2\":\"B00|Owen Defense: Hekili-Loa Gambit\",\"26i2nnjdp7n\":\"B00|Owen Defense: Matovinsky Gambit\",\"pg7ax8bmiy\":\"B00|Owen Defense: Naselwaus Gambit\",\"h5kt3chrg5\":\"B00|Owen Defense: Smith Gambit\",\"11ofaizf2rv\":\"B00|Owen Defense: Unicorn Variation\",\"m5ceqdkdn3\":\"B00|Owen Defense: Wind Gambit\",\"1hqhty5h7dd\":\"B00|Pirc Defense\",\"2aqp40z1ly5\":\"B00|Pirc Defense\",\"sznmqc7xuy\":\"B00|Pirc Defense\",\"pq7fhx1ffq\":\"B00|Pirc Defense: Roscher Gambit\",\"1p9yju0cs2x\":\"B00|Rat Defense: Antal Defense\",\"acjznpidk2\":\"B00|Rat Defense: Fuller Gambit\",\"8jnq7tsumj\":\"B00|Rat Defense: Harmonist\",\"1qfz9t8wlee\":\"B00|Rat Defense: Petruccioli Attack\",\"g5t5cezy3p\":\"B00|Rat Defense: Spike Attack\",\"9gbkxjkobh\":\"B00|St. George Defense\",\"14odtgssur4\":\"B00|St. George Defense: Polish Variation\",\"1tirc4j7q3q\":\"B00|St. George Defense: San Jorge Variation\",\"1b5u22oyeo0\":\"B00|St. George Defense: Zilbermints Gambit\",\"14p9aap8qjg\":\"B00|Van Geet Opening: Berlin Gambit\",\"vixwtw1kpe\":\"B00|Ware Defense\",\"34z2vu1fl1\":\"B00|Ware Defense: Snagglepuss Defense\",\"80ls675x4x\":\"B01|Scandinavian Defense\",\"238a48lnl10\":\"B01|Scandinavian Defense\",\"10306zv8b20\":\"B01|Scandinavian Defense: Anderssen Counterattack\",\"27xlwjjefek\":\"B01|Scandinavian Defense: Anderssen Counterattack, Collijn Variation\",\"2eqi33gyl5x\":\"B01|Scandinavian Defense: Anderssen Counterattack, Goteborg System\",\"q0y3em47si\":\"B01|Scandinavian Defense: Anderssen Counterattack, Orthodox Attack\",\"mq339eti1j\":\"B01|Scandinavian Defense: Blackburne Gambit\",\"qhb3u19aop\":\"B01|Scandinavian Defense: Blackburne-Kloosterboer Gambit\",\"2dwufu9ra84\":\"B01|Scandinavian Defense: Boehnke Gambit\",\"13lnzj3hrft\":\"B01|Scandinavian Defense: Bronstein Variation\",\"26koomld81y\":\"B01|Scandinavian Defense: Classical Variation\",\"rwylcyzecp\":\"B01|Scandinavian Defense: Grünfeld Variation\",\"etav08awac\":\"B01|Scandinavian Defense: Gubinsky-Melts Defense\",\"zul33mg150\":\"B01|Scandinavian Defense: Icelandic-Palme Gambit\",\"1mtavwbuaod\":\"B01|Scandinavian Defense: Kiel Variation\",\"1g48f8bcla6\":\"B01|Scandinavian Defense: Kloosterboer Gambit\",\"1molw3sxea3\":\"B01|Scandinavian Defense: Kádas Gambit\",\"29b7g0x97i6\":\"B01|Scandinavian Defense: Lasker Variation\",\"24qpkbn83na\":\"B01|Scandinavian Defense: Main Line\",\"k51mfcrkna\":\"B01|Scandinavian Defense: Main Line, Leonhardt Gambit\",\"19lk0tv252p\":\"B01|Scandinavian Defense: Main Line, Mieses Variation\",\"1u3v15u57bl\":\"B01|Scandinavian Defense: Marshall Variation\",\"1507izwzzvs\":\"B01|Scandinavian Defense: Mieses-Kotrč Variation\",\"6v4e4wezrr\":\"B01|Scandinavian Defense: Modern Variation\",\"1qse53ye1jp\":\"B01|Scandinavian Defense: Modern Variation\",\"1nt2r35kcuw\":\"B01|Scandinavian Defense: Modern Variation, Gipslis Variation\",\"2d753dbdufx\":\"B01|Scandinavian Defense: Modern Variation, Wing Gambit\",\"yauvwke5ii\":\"B01|Scandinavian Defense: Panov Transfer\",\"1rzbszvjs5i\":\"B01|Scandinavian Defense: Portuguese Gambit\",\"zh4w84bble\":\"B01|Scandinavian Defense: Portuguese Gambit, Banker Variation\",\"15h6vfg7iqc\":\"B01|Scandinavian Defense: Portuguese Gambit, Classical Variation\",\"b52lwhn3yh\":\"B01|Scandinavian Defense: Portuguese Gambit, Correspondence Refutation\",\"tmkx021roa\":\"B01|Scandinavian Defense: Portuguese Gambit, Elbow Variation\",\"24s68u47jd1\":\"B01|Scandinavian Defense: Portuguese Gambit, Jadoul Variation\",\"2enjdxp0hc5\":\"B01|Scandinavian Defense: Portuguese Gambit, Lusophobe Variation\",\"omtoqfszpi\":\"B01|Scandinavian Defense: Portuguese Gambit, Melbourne Shuffle Variation\",\"cas53gago0\":\"B01|Scandinavian Defense: Portuguese Gambit, Wuss Variation\",\"4lmbk78eay\":\"B01|Scandinavian Defense: Richter Variation\",\"y2xt8f2ufo\":\"B01|Scandinavian Defense: Richter Variation\",\"18270h6e963\":\"B01|Scandinavian Defense: Schiller-Pytel Variation\",\"dhtsv0gcjp\":\"B01|Scandinavian Defense: Schiller-Pytel Variation, Modern Variation\",\"nzhpapqrem\":\"B01|Scandinavian Defense: Valencian Variation\",\"rsgf9mr7lx\":\"B01|Scandinavian Defense: Valencian Variation, Ilundain Variation\",\"j8nxwiiqq3\":\"B01|Scandinavian Defense: Valencian Variation, Main Line\",\"1wkp6hcxt00\":\"B01|Scandinavian Defense: Zilbermints Gambit\",\"1ab6clozsnn\":\"B01|Van Geet Opening: Grünfeld Defense\",\"29svg2icl3u\":\"B02|Alekhine Defense\",\"a2j1w21wbz\":\"B02|Alekhine Defense: Brooklyn Variation\",\"zewbl5lro\":\"B02|Alekhine Defense: Brooklyn Variation, Everglades Variation\",\"28sethmj63v\":\"B02|Alekhine Defense: Buckley Attack\",\"21hq0pz4wf3\":\"B02|Alekhine Defense: Hunt Variation, Lasker Simul Gambit\",\"13fqzfu5hdf\":\"B02|Alekhine Defense: Hunt Variation, Matsukevich Gambit\",\"26qz2fstrx8\":\"B02|Alekhine Defense: Hunt Variation, Mikenas Gambit\",\"vx3bmxeszs\":\"B02|Alekhine Defense: Kmoch Variation\",\"ca34rxilft\":\"B02|Alekhine Defense: Krejcik Variation\",\"20wh1qtq7b3\":\"B02|Alekhine Defense: Krejcik Variation, Krejcik Gambit\",\"6f77urwzle\":\"B02|Alekhine Defense: Maróczy Variation\",\"2enwcegjifr\":\"B02|Alekhine Defense: Mokele Mbembe\",\"1gxmux8vys1\":\"B02|Alekhine Defense: Mokele Mbembe, Modern Line\",\"29591mkmoc8\":\"B02|Alekhine Defense: Mokele Mbembe, Vavra Defense\",\"1b69l6hcd02\":\"B02|Alekhine Defense: Normal Variation\",\"pzfg9xmknn\":\"B02|Alekhine Defense: Scandinavian Variation\",\"12hihdd983s\":\"B02|Alekhine Defense: Scandinavian Variation, Geschev Gambit\",\"17rah6hgay5\":\"B02|Alekhine Defense: Scandinavian Variation, Myers Gambit\",\"2dcpm26unej\":\"B02|Alekhine Defense: Spielmann Gambit\",\"1ib0hjb886s\":\"B02|Alekhine Defense: Steiner Variation\",\"10ag59f63b2\":\"B02|Alekhine Defense: Sämisch Attack\",\"1qzlfu7nk1g\":\"B02|Alekhine Defense: The Squirrel\",\"f47xie763c\":\"B02|Alekhine Defense: Two Pawns Attack\",\"dzpzzm2gva\":\"B02|Alekhine Defense: Two Pawns Attack, Lasker Variation\",\"oilfk50ms9\":\"B02|Alekhine Defense: Two Pawns Attack, Mikenas Variation\",\"cs8y6d89at\":\"B02|Alekhine Defense: Two Pawns Attack, Tate Variation\",\"224jhzpxm6\":\"B02|Alekhine Defense: Welling Variation\",\"179mqy6qzj2\":\"B03|Alekhine Defense\",\"10t69s33sl6\":\"B03|Alekhine Defense\",\"2f3w7za1aqz\":\"B03|Alekhine Defense\",\"djkw3xscu6\":\"B03|Alekhine Defense: Balogh Variation\",\"1wgwzlceu0t\":\"B03|Alekhine Defense: Exchange Variation\",\"mijkwl0f22\":\"B03|Alekhine Defense: Exchange Variation, Karpov Variation\",\"1emfpelgzxk\":\"B03|Alekhine Defense: Exchange Variation, Voronezh Variation\",\"1td05030cy0\":\"B03|Alekhine Defense: Four Pawns Attack\",\"21lq80bx9w2\":\"B03|Alekhine Defense: Four Pawns Attack, Cambridge Gambit\",\"1kji66cdmf4\":\"B03|Alekhine Defense: Four Pawns Attack, Fianchetto Variation\",\"2as680lef4l\":\"B03|Alekhine Defense: Four Pawns Attack, Ilyin-Zhenevsky Variation\",\"1xm3m3xc4ed\":\"B03|Alekhine Defense: Four Pawns Attack, Korchnoi Variation\",\"ixvwuya22a\":\"B03|Alekhine Defense: Four Pawns Attack, Main Line\",\"21adqzvjl12\":\"B03|Alekhine Defense: Four Pawns Attack, Tartakower Variation\",\"1bobcnw32kz\":\"B03|Alekhine Defense: Four Pawns Attack, Trifunovic Variation\",\"11a3jy5gyv\":\"B03|Alekhine Defense: Hunt Variation\",\"wgtmcw7r8d\":\"B03|Alekhine Defense: Modern Variation, Alekhine Gambit\",\"1nfmz8fn7gg\":\"B03|Alekhine Defense: O'Sullivan Gambit\",\"11e9o9ike2h\":\"B04|Alekhine Defense: Modern Variation\",\"10td7en6j3b\":\"B04|Alekhine Defense: Modern Variation, Alburt Variation\",\"asgel2e94f\":\"B04|Alekhine Defense: Modern Variation, Keres Variation\",\"1pbzdg8mzp1\":\"B04|Alekhine Defense: Modern Variation, Larsen Variation\",\"2gi1leqnkax\":\"B04|Alekhine Defense: Modern Variation, Larsen-Haakert Variation\",\"h5owopdu2j\":\"B04|Alekhine Defense: Modern Variation, Schmid Variation\",\"1x08ep457h7\":\"B05|Alekhine Defense: Modern Variation, Alekhine Variation\",\"dx2t9s4u5f\":\"B05|Alekhine Defense: Modern Variation, Flohr Variation\",\"yfnd1ddbhh\":\"B05|Alekhine Defense: Modern Variation, Main Line\",\"2d3kktoxz4r\":\"B05|Alekhine Defense: Modern Variation, Panov Variation\",\"yfbie5m21j\":\"B05|Alekhine Defense: Modern Variation, Vitolins Attack\",\"xaih3e342c\":\"B06|Modern Defense\",\"1qw7nwfmx1p\":\"B06|Modern Defense\",\"25juz5hm737\":\"B06|Modern Defense: Anti-Modern\",\"1n9p7o65kj8\":\"B06|Modern Defense: Bishop Attack\",\"1b0gwp0a5ez\":\"B06|Modern Defense: Bishop Attack, Bücker Gambit\",\"200t3cymrye\":\"B06|Modern Defense: Bishop Attack, Monkey's Bum\",\"uc3itvd8ex\":\"B06|Modern Defense: Dunworthy Variation\",\"so06cp0ee7\":\"B06|Modern Defense: Fianchetto Gambit\",\"1bk6gr1k99p\":\"B06|Modern Defense: Gurgenidze Defense\",\"hb7uue8nyk\":\"B06|Modern Defense: Lizard Defense, Mittenberger Gambit\",\"15ptun4gtk8\":\"B06|Modern Defense: Masur Gambit\",\"16l2ut9ha16\":\"B06|Modern Defense: Modern Pterodactyl\",\"1do78cdbg03\":\"B06|Modern Defense: Mongredien Defense, with Nc3\",\"enl4z3ullw\":\"B06|Modern Defense: Mongredien Defense, with Nf3\",\"90ui9ywrux\":\"B06|Modern Defense: Norwegian Defense\",\"3gwcz3sqvu\":\"B06|Modern Defense: Norwegian Defense, Norwegian Gambit\",\"dcdrtpzn0s\":\"B06|Modern Defense: Pseudo-Austrian Attack\",\"1dmylucokrh\":\"B06|Modern Defense: Semi-Averbakh Variation, Pterodactyl Variation Declined\",\"k77gdv0ngq\":\"B06|Modern Defense: Standard Defense\",\"lhu9r1tv12\":\"B06|Modern Defense: Standard Line\",\"1casgxdycv0\":\"B06|Modern Defense: Three Pawns Attack\",\"10fca3xx9z4\":\"B06|Modern Defense: Two Knights Variation\",\"1nwfznnrjpy\":\"B06|Modern Defense: Two Knights Variation, Suttles Variation\",\"uwtv6ce6ym\":\"B06|Modern Defense: Two Knights Variation, Suttles Variation, Tal Gambit\",\"20ob3ty4hj3\":\"B06|Modern Defense: Westermann Gambit\",\"1leq783msrq\":\"B06|Modern Defense: Wind Gambit\",\"s5k2bt67pq\":\"B06|Pterodactyl Defense: Austrian, Austriadactylus Western\",\"nh5q4ditzw\":\"B06|Pterodactyl Defense: Austrian, Grand Prix Pterodactyl\",\"aoklyupsf7\":\"B06|Pterodactyl Defense: Austrian, Pteranodon\",\"1iuhq0bc6gr\":\"B06|Pterodactyl Defense: Central, Anhanguera\",\"26yhrcr4os9\":\"B06|Pterodactyl Defense: Central, Benoni Quetzalcoatlus\",\"22qryn1cww0\":\"B06|Pterodactyl Defense: Central, Quetzalcoatlus Gambit\",\"1k9bz41957p\":\"B06|Pterodactyl Defense: Eastern, Anhanguera\",\"1c3z0u0jgr4\":\"B06|Pterodactyl Defense: Eastern, Benoni\",\"jgq1fhz4db\":\"B06|Pterodactyl Defense: Eastern, Benoni Pteranodon\",\"19dx0fbws2n\":\"B06|Pterodactyl Defense: Eastern, Benoni Pterodactyl\",\"20170vtyzvi\":\"B06|Pterodactyl Defense: Eastern, Pteranodon\",\"1315h27c31k\":\"B06|Pterodactyl Defense: Eastern, Rhamphorhynchus\",\"174h5ry7ins\":\"B06|Pterodactyl Defense: Fianchetto, King Pterodactyl\",\"1n1vw93gcdi\":\"B06|Pterodactyl Defense: Fianchetto, Rhamphorhynchus\",\"3evu2jwt1t\":\"B06|Pterodactyl Defense: Sicilian, Quetzalcoatlus\",\"zihpfpqd7o\":\"B06|Pterodactyl Defense: Sicilian, Siroccopteryx\",\"28g1ar0y82m\":\"B06|Pterodactyl Defense: Western, Anhanguera\",\"1d7p3ynrn3l\":\"B06|Pterodactyl Defense: Western, Siroccopteryx\",\"4ociph13pe\":\"B06|Rat Defense: Accelerated Gurgenidze\",\"1z4sy2lmav2\":\"B07|Czech Defense\",\"gbjcw14n8j\":\"B07|King's Pawn Game: Maróczy Defense\",\"1jo7ovjp405\":\"B07|Lion Defense\",\"2a1rcxnsox\":\"B07|Lion Defense: Anti-Philidor\",\"24pg6ulflyw\":\"B07|Lion Defense: Anti-Philidor, Lion's Cave\",\"25ulxvt27o8\":\"B07|Lion Defense: Anti-Philidor, Lion's Cave, Lion Claw Gambit\",\"lmclv956v7\":\"B07|Lion Defense: Bayonet Attack\",\"ocyrk57ozd\":\"B07|Modern Defense: Geller's System\",\"euewesr3hu\":\"B07|Pirc Defense\",\"1vwl9na5c16\":\"B07|Pirc Defense: 150 Attack\",\"1kzxz7cq5mz\":\"B07|Pirc Defense: 150 Attack, Inner Doll Defense\",\"pjwz924klp\":\"B07|Pirc Defense: 150 Attack, Sveshnikov-Jansa Attack\",\"ozbkijx5zh\":\"B07|Pirc Defense: Bayonet Attack\",\"2fb4df2izpa\":\"B07|Pirc Defense: Byrne Variation\",\"upmafrxzbd\":\"B07|Pirc Defense: Chinese Variation\",\"1c3lhxkj5hs\":\"B07|Pirc Defense: Kholmov System\",\"5ux3u85dik\":\"B07|Pirc Defense: Sveshnikov System\",\"132nq4irhwv\":\"B08|Pirc Defense: Classical Variation\",\"1i6qbgwv5xf\":\"B08|Pirc Defense: Classical Variation\",\"m4cz3tdzex\":\"B08|Pirc Defense: Classical Variation, Quiet System\",\"jvkaqlxn2q\":\"B08|Pirc Defense: Classical Variation, Quiet System, Chigorin Line\",\"21dzw0hx1vy\":\"B08|Pirc Defense: Classical Variation, Quiet System, Czech Defense\",\"qx86nou90w\":\"B08|Pirc Defense: Classical Variation, Quiet System, Parma Defense\",\"1ry7e6r2ze7\":\"B08|Pirc Defense: Classical Variation, Schlechter Variation\",\"12gxo7nfqxo\":\"B09|Pirc Defense: Austrian Attack\",\"1ro7m0lxcwa\":\"B09|Pirc Defense: Austrian Attack\",\"m4f27g6czw\":\"B09|Pirc Defense: Austrian Attack, Dragon Formation\",\"h4r2u5k4pw\":\"B09|Pirc Defense: Austrian Attack, Kurajica Variation\",\"j3mknlbov6\":\"B09|Pirc Defense: Austrian Attack, Ljubojevic Variation\",\"11qqrok8lg\":\"B09|Pirc Defense: Austrian Attack, Unzicker Attack\",\"1hbxhkllnov\":\"B09|Pirc Defense: Austrian Attack, Unzicker Attack, Bronstein Variation\",\"zirrhw629p\":\"B09|Pirc Defense: Austrian Attack, Weiss Variation\",\"h2nzvw3f31\":\"B10|Caro-Kann Defense\",\"1jnga0s38ak\":\"B10|Caro-Kann Defense\",\"xwkqgk6t9i\":\"B10|Caro-Kann Defense\",\"anomde5as4\":\"B10|Caro-Kann Defense: Accelerated Panov Attack\",\"28sl1vslhs2\":\"B10|Caro-Kann Defense: Accelerated Panov Attack\",\"dj5p3mvrk2\":\"B10|Caro-Kann Defense: Accelerated Panov Attack, Modern Variation\",\"h1x1cq71ld\":\"B10|Caro-Kann Defense: Accelerated Panov Attack, Open Variation\",\"14e42tvzm8q\":\"B10|Caro-Kann Defense: Accelerated Panov Attack, Pseudo-Scandinavian\",\"1ognzj3w4kb\":\"B10|Caro-Kann Defense: Accelerated Panov Attack, Van Weersel Attack\",\"xqktwzmueo\":\"B10|Caro-Kann Defense: Apocalypse Attack\",\"zfupt03rkj\":\"B10|Caro-Kann Defense: Breyer Variation\",\"diab402puj\":\"B10|Caro-Kann Defense: Breyer Variation, Stein Attack\",\"288ifrsqxhq\":\"B10|Caro-Kann Defense: Dinic Gambit\",\"1lk7ro0s6b9\":\"B10|Caro-Kann Defense: Endgame Offer\",\"49hmcjmdrw\":\"B10|Caro-Kann Defense: Endgame Variation\",\"1frre4iftet\":\"B10|Caro-Kann Defense: Euwe Attack\",\"snaozkhm1w\":\"B10|Caro-Kann Defense: Goldman Variation\",\"862vz1vp8o\":\"B10|Caro-Kann Defense: Hector Gambit\",\"t9z3bl06vx\":\"B10|Caro-Kann Defense: Hillbilly Attack\",\"1oyf003dvwf\":\"B10|Caro-Kann Defense: Hillbilly Attack, Schaeffer Gambit\",\"1sdw5zlfeqr\":\"B10|Caro-Kann Defense: Labahn Attack\",\"1b7liin8wv\":\"B10|Caro-Kann Defense: Labahn Attack, Double Gambit\",\"xtiphr5b8j\":\"B10|Caro-Kann Defense: Labahn Attack, Polish Variation\",\"2gdowgny2t4\":\"B10|Caro-Kann Defense: Scorpion-Horus Gambit\",\"24iczo6udfy\":\"B10|Caro-Kann Defense: Spike Variation\",\"19gofkjwpca\":\"B10|Caro-Kann Defense: Spike Variation, Scorpion-Grob Gambit\",\"23k3ufyitgr\":\"B10|Caro-Kann Defense: St. Patrick's Attack\",\"dprpv51epb\":\"B10|Caro-Kann Defense: Toikkanen Gambit\",\"l0rfhmsrrc\":\"B10|Caro-Kann Defense: Two Knights Attack\",\"1s0o19r0hie\":\"B11|Caro-Kann Defense: Two Knights Attack, Mindeno Variation\",\"znl7epsxme\":\"B11|Caro-Kann Defense: Two Knights Attack, Mindeno Variation, Exchange Line\",\"1xivxy6yqrc\":\"B11|Caro-Kann Defense: Two Knights Attack, Mindeno Variation, Retreat Line\",\"11jqtjch99o\":\"B12|Caro-Kann Defense\",\"14yv4bw0f42\":\"B12|Caro-Kann Defense\",\"2cjw9fbgsvy\":\"B12|Caro-Kann Defense: Advance Variation\",\"1y8cuh0x8oa\":\"B12|Caro-Kann Defense: Advance Variation, Bayonet Attack\",\"2ad935j1zni\":\"B12|Caro-Kann Defense: Advance Variation, Botvinnik-Carls Defense\",\"gqq0gzipff\":\"B12|Caro-Kann Defense: Advance Variation, Bronstein Variation\",\"20k9f44l5an\":\"B12|Caro-Kann Defense: Advance Variation, Prins Attack\",\"wsorv5080h\":\"B12|Caro-Kann Defense: Advance Variation, Short Variation\",\"dx0ci6l33a\":\"B12|Caro-Kann Defense: Advance Variation, Tal Variation\",\"26ekym961ke\":\"B12|Caro-Kann Defense: Advance Variation, Van der Wiel Attack\",\"kivne2l63o\":\"B12|Caro-Kann Defense: Advance Variation, Van der Wiel Attack\",\"2e842b6y1fx\":\"B12|Caro-Kann Defense: Advance Variation, Van der Wiel Attack, Dreyev Defense\",\"bkj5rkacnk\":\"B12|Caro-Kann Defense: Advance, Short Variation\",\"26iipgbor8e\":\"B12|Caro-Kann Defense: De Bruycker Defense\",\"12w3to9a28i\":\"B12|Caro-Kann Defense: De Bruycker Defense\",\"1nf0udwa1fu\":\"B12|Caro-Kann Defense: Edinburgh Variation\",\"7pmuye2etm\":\"B12|Caro-Kann Defense: Maróczy Variation\",\"1tn1ykiwuqt\":\"B12|Caro-Kann Defense: Maróczy Variation, Maróczy Gambit\",\"6788us2amb\":\"B12|Caro-Kann Defense: Masi Variation\",\"f0j2boxhor\":\"B12|Caro-Kann Defense: Massachusetts Defense\",\"2168cpgsqwk\":\"B12|Caro-Kann Defense: Mieses Attack, Landau Gambit\",\"141mra6a0ry\":\"B12|Caro-Kann Defense: Mieses Gambit\",\"1hlb8u5w8a5\":\"B12|Caro-Kann Defense: Modern Variation\",\"4jq23ebdy0\":\"B12|Caro-Kann Defense: Ulysses Gambit\",\"rvdvz2cpwb\":\"B13|Caro-Kann Defense: Exchange Variation\",\"1yccg1kirmp\":\"B13|Caro-Kann Defense: Exchange Variation\",\"yyca74hmbb\":\"B13|Caro-Kann Defense: Exchange Variation\",\"1rxldu8qksr\":\"B13|Caro-Kann Defense: Exchange Variation\",\"1n2wn5scomp\":\"B13|Caro-Kann Defense: Exchange Variation, Bulla Attack\",\"29x779fznrf\":\"B13|Caro-Kann Defense: Exchange Variation, Rubinstein Variation\",\"2esjgt3ybrd\":\"B13|Caro-Kann Defense: Panov Attack\",\"5jhdhyxifn\":\"B13|Caro-Kann Defense: Panov Attack\",\"g1vcwy5qq8\":\"B13|Caro-Kann Defense: Panov Attack, Gunderam Attack\",\"hgxdmqx90f\":\"B13|Caro-Kann Defense: Panov Attack, Modern Defense\",\"1tjzampbyld\":\"B13|Caro-Kann Defense: Panov Attack, Modern Defense, Carlsbad Line\",\"uwet5ucn9j\":\"B13|Caro-Kann Defense: Panov Attack, Modern Defense, Czerniak Line\",\"2prfyw15qp\":\"B13|Caro-Kann Defense: Panov Attack, Modern Defense, Mieses Line\",\"qjaa3sr0am\":\"B13|Caro-Kann Defense: Panov Attack, Modern Defense, Reifir-Spielmann Line\",\"paz7p3qq1\":\"B13|Caro-Kann Defense: Panov-Botvinnik, Herzog Defense\",\"26n36wioct9\":\"B14|Caro-Kann Defense: Panov Attack\",\"11k7ik1osbe\":\"B14|Caro-Kann Defense: Panov Attack\",\"1sn2sjarfrs\":\"B14|Caro-Kann Defense: Panov Attack\",\"sq8or789or\":\"B14|Caro-Kann Defense: Panov Attack\",\"2ew3sjabjjp\":\"B14|Caro-Kann Defense: Panov Attack, Fianchetto Defense\",\"fcc602shbz\":\"B14|Caro-Kann Defense: Panov Attack, Fianchetto Defense, Fianchetto Gambit\",\"37kf6mn5bw\":\"B14|Caro-Kann Defense: Panov Attack, Main Line\",\"a3juavn78e\":\"B15|Caro-Kann Defense\",\"14ptun7t1un\":\"B15|Caro-Kann Defense\",\"3okv4rx9cl\":\"B15|Caro-Kann Defense: Alekhine Gambit\",\"5x5m2k8f0g\":\"B15|Caro-Kann Defense: Alien Gambit\",\"2dgk95d8s2d\":\"B15|Caro-Kann Defense: Campomanes Attack\",\"t06xm478i0\":\"B15|Caro-Kann Defense: Forgacs Variation\",\"2c709s5bdim\":\"B15|Caro-Kann Defense: Gurgenidze Counterattack\",\"1lqpwj9ri8j\":\"B15|Caro-Kann Defense: Gurgenidze System\",\"4i5emd7mmt\":\"B15|Caro-Kann Defense: Main Line\",\"1s5tgjw1nwm\":\"B15|Caro-Kann Defense: Rasa-Studier Gambit\",\"1xiyq9ad4oi\":\"B15|Caro-Kann Defense: Tartakower Variation\",\"183duu5ae2z\":\"B15|Caro-Kann Defense: Tartakower Variation, Perlis Line\",\"1dd5suijb8z\":\"B15|Caro-Kann Defense: von Hennig Gambit\",\"hpb0tljsht\":\"B16|Caro-Kann Defense: Bronstein-Larsen Variation\",\"1woznlv1wih\":\"B16|Caro-Kann Defense: Finnish Variation\",\"1q156ytiky5\":\"B17|Caro-Kann Defense: Karpov Variation\",\"w3jr63a61n\":\"B17|Caro-Kann Defense: Karpov Variation, Modern Main Line\",\"1h107vdmw71\":\"B17|Caro-Kann Defense: Karpov Variation, Modern Variation\",\"nypl9078d\":\"B17|Caro-Kann Defense: Karpov Variation, Modern Variation, Ivanchuk Defense\",\"nfhmf6beki\":\"B17|Caro-Kann Defense: Karpov Variation, Modern Variation, Kasparov Attack\",\"qvm5fc70ig\":\"B17|Caro-Kann Defense: Karpov Variation, Smyslov Variation\",\"1wiv0p09xbl\":\"B17|Caro-Kann Defense: Karpov Variation, Smyslov Variation, Main Line\",\"1o7sq7moph9\":\"B17|Caro-Kann Defense: Karpov Variation, Tiviakov-Fischer Attack\",\"2dwvr09ehpo\":\"B18|Caro-Kann Defense: Classical Variation\",\"14bsh4ks25y\":\"B18|Caro-Kann Defense: Classical Variation, Flohr Variation\",\"f2afc8xkph\":\"B18|Caro-Kann Defense: Classical Variation, Main Line\",\"24djz8faxld\":\"B18|Caro-Kann Defense: Classical Variation, Maróczy Attack\",\"w4o32kycmw\":\"B18|Caro-Kann Defense: Martian Gambit\",\"1ockvv0x8h9\":\"B19|Caro-Kann Defense: Classical Variation\",\"2d2n1mdh3q0\":\"B19|Caro-Kann Defense: Classical Variation, Lobron System\",\"fydfrsfpfj\":\"B19|Caro-Kann Defense: Classical Variation, Seirawan Variation\",\"1r98p9hvhaa\":\"B19|Caro-Kann Defense: Classical Variation, Spassky Variation\",\"ttjb8k50tb\":\"B20|Sicilian Defense\",\"1n7x303z1pu\":\"B20|Sicilian Defense: Amazon Attack\",\"drpf66wep\":\"B20|Sicilian Defense: Big Clamp Formation\",\"2btueqi67sk\":\"B20|Sicilian Defense: Bowdler Attack\",\"792j1brcv6\":\"B20|Sicilian Defense: Brick Variation\",\"9yj5hhgi6j\":\"B20|Sicilian Defense: Czerniak Attack\",\"22b1zagarvt\":\"B20|Sicilian Defense: Czerniak Attack, Queen Fianchetto Variation\",\"hh7mu661em\":\"B20|Sicilian Defense: Euwe Attack, Prins Gambit\",\"wykjdgasq2\":\"B20|Sicilian Defense: Gloria Variation\",\"1c7pzqp3nj7\":\"B20|Sicilian Defense: Grob Variation\",\"276u7qz64es\":\"B20|Sicilian Defense: Keres Variation\",\"1160gjhzdnp\":\"B20|Sicilian Defense: King David's Opening\",\"3k2xt481y0\":\"B20|Sicilian Defense: Kronberger Variation\",\"hde0c7iow8\":\"B20|Sicilian Defense: Kronberger Variation, Nemeth Gambit\",\"eqyketcbsx\":\"B20|Sicilian Defense: Lasker-Dunne Attack\",\"1f6qwsw24cr\":\"B20|Sicilian Defense: Mengarini Variation\",\"11rsry8tv88\":\"B20|Sicilian Defense: Myers Attack, with a4\",\"104fhhodgml\":\"B20|Sicilian Defense: Myers Attack, with h4\",\"21p6oyi5eng\":\"B20|Sicilian Defense: Staunton-Cochrane Variation\",\"1r0uyxm4eco\":\"B20|Sicilian Defense: Wing Gambit\",\"m4vv2ga8px\":\"B20|Sicilian Defense: Wing Gambit, Abrahams Variation\",\"2ajf6ruynot\":\"B20|Sicilian Defense: Wing Gambit, Carlsbad Variation\",\"29fjlf624vj\":\"B20|Sicilian Defense: Wing Gambit, Marienbad Variation\",\"1bcri16hpu3\":\"B20|Sicilian Defense: Wing Gambit, Marshall Variation\",\"ftmdowwnf0\":\"B20|Sicilian Defense: Wing Gambit, Nanu Gambit\",\"13rzzu4ihdh\":\"B20|Sicilian Defense: Wing Gambit, Romanian Defense\",\"1m8ypk80df7\":\"B20|Sicilian Defense: Wing Gambit, Santasiere Variation\",\"j87asxl9ru\":\"B21|Bird Opening: Dutch Variation, Batavo Gambit\",\"18jc3h4nto1\":\"B21|Sicilian Defense: Coles Sicilian Gambit\",\"1qnezbhuq0\":\"B21|Sicilian Defense: Halasz Gambit\",\"ulrso2z5vl\":\"B21|Sicilian Defense: McDonnell Attack\",\"1arxcu8b1a9\":\"B21|Sicilian Defense: McDonnell Attack\",\"20fwmclh4sg\":\"B21|Sicilian Defense: McDonnell Attack\",\"qsn5ef0shi\":\"B21|Sicilian Defense: McDonnell Attack\",\"1wcur7dv5wb\":\"B21|Sicilian Defense: McDonnell Attack\",\"1efil778xxv\":\"B21|Sicilian Defense: McDonnell Attack\",\"hhhjkd7xq0\":\"B21|Sicilian Defense: McDonnell Attack, Tal Gambit\",\"c6yt9jlolq\":\"B21|Sicilian Defense: McDonnell Attack, Toilet Variation\",\"1512qkavy4k\":\"B21|Sicilian Defense: Morphy Gambit\",\"1mz1xvd3yt3\":\"B21|Sicilian Defense: Morphy Gambit, Andreaschek Gambit\",\"1t8nshsjv3b\":\"B21|Sicilian Defense: Smith-Morra Gambit\",\"7l0mhr40pq\":\"B21|Sicilian Defense: Smith-Morra Gambit\",\"16nmek56cmr\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted\",\"zz3exnb9wm\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Chicago Defense\",\"1rlharx1ful\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Chicago Defense\",\"ahra6ho97r\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Classical Formation\",\"1fml30j1zyr\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Danish Variation\",\"2a9cc6j5773\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Fianchetto Defense\",\"27b94rv3fqp\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Fianchetto Defense\",\"8hkn3u44as\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Fianchetto Defense\",\"106t8w93ue9\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Fianchetto Defense\",\"g9ezbj6qlr\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Finegold Defense\",\"aftspvwq9p\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Kan Formation\",\"7ysyj3jkiv\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Larsen Defense\",\"1kpog8cpdeq\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Morphy Defense\",\"5tor2cxcgp\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Morphy Defense Deferred\",\"1ls0j6npgq3\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Paulsen Formation\",\"jeiz464qjm\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Pin Defense\",\"ljsomopg8d\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Scheveningen Formation\",\"20jzx31z5c6\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Siberian Variation\",\"1a8gtrue56q\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Siberian Variation, Siberian Trap\",\"7khepk1mvm\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Sozin Formation\",\"12a4dkclpq7\":\"B21|Sicilian Defense: Smith-Morra Gambit Accepted, Taimanov Formation\",\"q1vx46xxig\":\"B21|Sicilian Defense: Smith-Morra Gambit Declined, Alapin Formation\",\"1rit042s6c8\":\"B21|Sicilian Defense: Smith-Morra Gambit Declined, Center Formation\",\"ts57gqj5ao\":\"B21|Sicilian Defense: Smith-Morra Gambit Declined, Dubois Variation\",\"12nlfwwh0h5\":\"B21|Sicilian Defense: Smith-Morra Gambit Declined, Push Variation\",\"mc7y99xv57\":\"B21|Sicilian Defense: Smith-Morra Gambit Declined, Scandinavian Formation\",\"25eq65fjeob\":\"B21|Sicilian Defense: Smith-Morra Gambit Declined, Wing Formation\",\"1iok4tggdnj\":\"B22|Sicilian Defense: Alapin Variation\",\"253eytzrn5y\":\"B22|Sicilian Defense: Alapin Variation, Anti-Alapin Gambit\",\"1xvgb7oo78a\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense\",\"1mjbfzyrsux\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense\",\"1rv3ki4ev95\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense\",\"1imwfkr51d3\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense, Central Exchange\",\"2gbysurtkai\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense, Endgame Variation\",\"24rg4ii9v14\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense, Milner-Barry Attack\",\"1iwwlwby3s0\":\"B22|Sicilian Defense: Alapin Variation, Barmen Defense, Modern Line\",\"1krlfpap2jp\":\"B22|Sicilian Defense: Alapin Variation, Smith-Morra Declined\",\"6693sk9dln\":\"B22|Sicilian Defense: Alapin Variation, Stoltz Attack\",\"r1d46fytb7\":\"B22|Sicilian Defense: Alapin Variation, Stoltz Attack, Ivanchuk Line\",\"1qs91ig93bt\":\"B22|Sicilian Defense: Delayed Alapin Variation\",\"1q5kxdw47k9\":\"B22|Sicilian Defense: Delayed Alapin Variation\",\"xwndwbvhmt\":\"B22|Sicilian Defense: Heidenfeld Variation\",\"nzgee9x10y\":\"B23|Sicilian Defense: Closed\",\"3tfgnyn8y9\":\"B23|Sicilian Defense: Closed\",\"2ckbexmoxwh\":\"B23|Sicilian Defense: Closed\",\"22279eh9wto\":\"B23|Sicilian Defense: Closed\",\"s7z35qnofo\":\"B23|Sicilian Defense: Closed\",\"lf8l49kqu1\":\"B23|Sicilian Defense: Closed\",\"w84sk830sk\":\"B23|Sicilian Defense: Closed, Carlsen Variation\",\"2b4leogps0v\":\"B23|Sicilian Defense: Closed, Chameleon Variation\",\"w1g2csag4w\":\"B23|Sicilian Defense: Closed, Grob Attack\",\"1gce2hettrt\":\"B23|Sicilian Defense: Closed, Korchnoi Defense\",\"h5cs0qnmq1\":\"B23|Sicilian Defense: Closed, Portland Attack\",\"4gcbuunag9\":\"B23|Sicilian Defense: Closed, Traditional\",\"rt7pmr8pup\":\"B23|Sicilian Defense: Grand Prix Attack\",\"u9m0bc5ojy\":\"B23|Sicilian Defense: Grand Prix Attack, Schofman Variation\",\"qduxuko8en\":\"B24|Sicilian Defense: Closed\",\"39s10qezuz\":\"B24|Sicilian Defense: Closed\",\"uhsw3u0mwz\":\"B24|Sicilian Defense: Closed, Fianchetto Variation\",\"r6giiadwjd\":\"B24|Sicilian Defense: Closed, Smyslov Variation\",\"51dh6pwmyj\":\"B25|Sicilian Defense: Closed\",\"1w3ncqos2yn\":\"B25|Sicilian Defense: Closed\",\"7ng8icy1tz\":\"B25|Sicilian Defense: Closed, Botvinnik Defense, Edge Variation\",\"1gsbgi51scd\":\"B25|Sicilian Defense: Closed, Botvinnik Defense, with Nge2\",\"f69jymfoju\":\"B25|Sicilian Defense: Closed, Botvinnik Defense, with f4\",\"5drez5v2a\":\"B26|Sicilian Defense: Closed\",\"1fe6v2sam3r\":\"B27|Modern Defense: Pterodactyl Variation\",\"p6hture3pk\":\"B27|Pterodactyl Defense: Sicilian, Anhanguera\",\"1i15ci27gf7\":\"B27|Pterodactyl Defense: Sicilian, Benoni Gambit\",\"2atyjlq5zcc\":\"B27|Pterodactyl Defense: Sicilian, Pteranodon\",\"klgi0ymw6q\":\"B27|Pterodactyl Defense: Sicilian, Rhamphorhynchus\",\"1usdb8jf119\":\"B27|Pterodactyl Defense: Sicilian, Unpin\",\"itxpav0vtp\":\"B27|Pterodactyl Defense: Western, Pterodactyl\",\"16igddksn7e\":\"B27|Pterodactyl Defense: Western, Rhamphorhynchus\",\"1ha9b2t7wul\":\"B27|Sicilian Defense\",\"1pc6txy9smg\":\"B27|Sicilian Defense: Acton Extension\",\"xvc1url5lb\":\"B27|Sicilian Defense: Brussels Gambit\",\"1080bytu4sp\":\"B27|Sicilian Defense: Bücker Variation\",\"4827jttcbt\":\"B27|Sicilian Defense: Double-Dutch Gambit\",\"pxxwzylpc8\":\"B27|Sicilian Defense: Frederico Variation\",\"fy8uwep584\":\"B27|Sicilian Defense: Hyperaccelerated Dragon\",\"2ctk1aoxksw\":\"B27|Sicilian Defense: Hyperaccelerated Dragon\",\"efe5huqzw3\":\"B27|Sicilian Defense: Hyperaccelerated Pterodactyl\",\"3otjeg0zzv\":\"B27|Sicilian Defense: Hyperaccelerated Pterodactyl, Exchange Variation\",\"o982yeaztm\":\"B27|Sicilian Defense: Jalalabad Variation\",\"148jpzmxvvw\":\"B27|Sicilian Defense: Katalimov Variation\",\"x5gy8guq7h\":\"B27|Sicilian Defense: Mongoose Variation\",\"25iwbxlxhjy\":\"B27|Sicilian Defense: Polish Gambit\",\"15gjx297b21\":\"B27|Sicilian Defense: Quinteros Variation\",\"24zwh7lzx0p\":\"B28|Sicilian Defense: O'Kelly Variation\",\"22q96se6vf3\":\"B28|Sicilian Defense: O'Kelly Variation, Aronin System\",\"129j0rypi9a\":\"B28|Sicilian Defense: O'Kelly Variation, Kieseritzky System\",\"1w0zq5fs5xg\":\"B28|Sicilian Defense: O'Kelly Variation, Maróczy Bind\",\"1hekqmr0szh\":\"B28|Sicilian Defense: O'Kelly Variation, Maróczy Bind, Paulsen Line\",\"f0676p34ic\":\"B28|Sicilian Defense: O'Kelly Variation, Maróczy Bind, Robatsch Line\",\"2dnwgoutfza\":\"B28|Sicilian Defense: O'Kelly Variation, Normal System\",\"1ndgi8n7ptj\":\"B28|Sicilian Defense: O'Kelly Variation, Normal System, Cortlever Gambit\",\"s9f6elfx5u\":\"B28|Sicilian Defense: O'Kelly Variation, Normal System, Smith-Morra Line\",\"29dvubjd8nj\":\"B28|Sicilian Defense: O'Kelly Variation, Normal System, Taimanov Line\",\"27b20qr5l1v\":\"B28|Sicilian Defense: O'Kelly Variation, Normal System, Zagorovsky Line\",\"2bs1yaqyd1o\":\"B28|Sicilian Defense: O'Kelly Variation, Quiet System\",\"14l8r6annjr\":\"B28|Sicilian Defense: O'Kelly Variation, Réti System\",\"8aede8vcox\":\"B28|Sicilian Defense: O'Kelly Variation, Venice System\",\"v4sfnnbkwr\":\"B28|Sicilian Defense: O'Kelly Variation, Venice System, Barcza Line\",\"wrfojaahes\":\"B28|Sicilian Defense: O'Kelly Variation, Venice System, Gambit Line\",\"p9wqkd13wm\":\"B28|Sicilian Defense: O'Kelly Variation, Venice System, Ljubojevic Line\",\"1hpboygzq91\":\"B28|Sicilian Defense: O'Kelly Variation, Venice System, Steiner Line\",\"1im71nmr66u\":\"B28|Sicilian Defense: O'Kelly Variation, Wing Gambit\",\"3u7yel2t9f\":\"B28|Sicilian Defense: O'Kelly Variation, Yerevan System\",\"1zqyl6qafx2\":\"B29|Sicilian Defense: Nimzowitsch Variation\",\"a6jl34qxkx\":\"B29|Sicilian Defense: Nimzowitsch Variation, Advance Variation\",\"3svpxzblfl\":\"B29|Sicilian Defense: Nimzowitsch Variation, Closed Variation\",\"d5f2q2n9fx\":\"B29|Sicilian Defense: Nimzowitsch Variation, Exchange Variation\",\"7zxfhve4o3\":\"B29|Sicilian Defense: Nimzowitsch Variation, Main Line\",\"sdhp4s4omv\":\"B30|Sicilian Defense: Closed, Anti-Sveshnikov Variation\",\"mh7hi3ramn\":\"B30|Sicilian Defense: Closed, Anti-Sveshnikov Variation, Kharlov-Kramnik Line\",\"1ijmgbutg90\":\"B30|Sicilian Defense: Closed, Anti-Sveshnikov Variation, with Nf6\",\"1j3rpr9syh4\":\"B30|Sicilian Defense: Closed, Anti-Sveshnikov Variation, with d6\",\"vpf62ccxk6\":\"B30|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack\",\"26lphpqnvhd\":\"B30|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, Brooklyn Retreat Defense\",\"u7z0xg2zur\":\"B30|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, San Francisco Gambit\",\"7cx99vesfi\":\"B30|Sicilian Defense: Old Sicilian\",\"4mxvjzmrvs\":\"B30|Sicilian Defense: Portsmouth Gambit\",\"1coi0bdvb61\":\"B31|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, Fianchetto Variation\",\"8ggisc4jys\":\"B31|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, Fianchetto Variation, Gufeld Gambit\",\"2e3ljvg0lo\":\"B31|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, Fianchetto Variation, Lutikov Gambit\",\"2cz0bpqixkd\":\"B31|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, Fianchetto Variation, Totsky Attack\",\"avi56kt5y7\":\"B31|Sicilian Defense: Nyezhmetdinov-Rossolimo Attack, Gurgenidze Variation\",\"khnh8hy46n\":\"B32|Sicilian Defense: Accelerated Dragon\",\"242yprtva5n\":\"B32|Sicilian Defense: Flohr Variation\",\"18nv1jxvg29\":\"B32|Sicilian Defense: Franco-Sicilian Variation\",\"repbqpy04d\":\"B32|Sicilian Defense: Godiva Variation\",\"252l0x5ns17\":\"B32|Sicilian Defense: Kalashnikov Variation\",\"msxbc5t5m0\":\"B32|Sicilian Defense: Löwenthal Variation\",\"j153z8f73k\":\"B32|Sicilian Defense: Nimzo-American Variation\",\"jux8x51y2g\":\"B32|Sicilian Defense: O'Kelly Variation, Maróczy Bind, Geller Line\",\"7rl6vf0926\":\"B32|Sicilian Defense: Open\",\"6uf8u1ip9h\":\"B32|Sicilian Defense: Open\",\"1l50bcqpuzj\":\"B32|Sicilian Defense: Open\",\"24dsmi0allg\":\"B33|Sicilian Defense: Lasker-Pelikan Variation\",\"19dxuhchitr\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Bird Variation\",\"182bkr68kae\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Exchange Variation\",\"1auk65wkhfl\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Retreat Variation\",\"m68t2z2fc4\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Schlechter Variation\",\"6dkm4hju1h\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Sveshnikov Variation\",\"wg7j2ws4kq\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Sveshnikov Variation\",\"278u910kj21\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Sveshnikov Variation, Chelyabinsk Variation\",\"1ys32qwphxp\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Sveshnikov Variation, Novosibirsk Variation\",\"le8t4pxa4m\":\"B33|Sicilian Defense: Lasker-Pelikan Variation, Sveshnikov Variation, Peresypkin's Sacrifice\",\"24fnv38nwer\":\"B33|Sicilian Defense: Open\",\"6pidme241v\":\"B34|Sicilian Defense: Accelerated Dragon, Exchange Variation\",\"k9i8j8ywb9\":\"B34|Sicilian Defense: Accelerated Dragon, Modern Variation\",\"nwg7cigypb\":\"B35|Sicilian Defense: Accelerated Dragon, Modern Bc4 Variation\",\"1z86srhju4s\":\"B35|Sicilian Defense: Dragon Variation, Modern Bc4 Variation\",\"2fe8ks5z5u5\":\"B36|Sicilian Defense: Accelerated Dragon, Maróczy Bind\",\"2142pn9oevg\":\"B36|Sicilian Defense: Accelerated Dragon, Maróczy Bind, Gurgenidze Variation\",\"omaa1aonqu\":\"B37|Sicilian Defense: Accelerated Dragon, Maróczy Bind\",\"1dce07918vb\":\"B37|Sicilian Defense: Accelerated Dragon, Simagin Variation\",\"ovulodkipi\":\"B38|Sicilian Defense: Accelerated Dragon, Maróczy Bind\",\"a2ws1l35em\":\"B39|Sicilian Defense: Accelerated Dragon, Maróczy Bind, Breyer Variation\",\"1d4q8yc27os\":\"B40|Sicilian Defense: Alapin Variation, Sherzer Variation\",\"dti47t1y6z\":\"B40|Sicilian Defense: Delayed Alapin Variation, with e6\",\"294e8s0ujwa\":\"B40|Sicilian Defense: Drazic Variation\",\"175p8eisfl7\":\"B40|Sicilian Defense: French Variation\",\"2dz2k97pe50\":\"B40|Sicilian Defense: French Variation, Normal\",\"imsbbsn477\":\"B40|Sicilian Defense: French Variation, Open\",\"datz799aul\":\"B40|Sicilian Defense: French Variation, Westerinen Attack\",\"21k4abuyzl3\":\"B40|Sicilian Defense: Gaw-Paw Variation\",\"1xzm2dktz48\":\"B40|Sicilian Defense: Kan Variation, Wing Attack, Fianchetto Variation\",\"u132awyvod\":\"B40|Sicilian Defense: Kramnik Variation\",\"160mnlgatvc\":\"B40|Sicilian Defense: Kveinis Variation\",\"wh3w7rl1e7\":\"B40|Sicilian Defense: Marshall Counterattack\",\"1wdckpbtjjc\":\"B40|Sicilian Defense: Paulsen-Basman Defense\",\"6pt1nq7oy8\":\"B40|Sicilian Defense: Pin Variation\",\"yjukgoh7i6\":\"B40|Sicilian Defense: Pin Variation, Jaffe Variation\",\"23nfxzfdo66\":\"B40|Sicilian Defense: Pin Variation, Koch Variation\",\"1ux27uw4ee2\":\"B40|Sicilian Defense: Smith-Morra Gambit Deferred\",\"27752dlshvo\":\"B40|Sicilian Defense: Wing Gambit Deferred\",\"ciq2y7ojih\":\"B41|Sicilian Defense: Kan Variation\",\"24rmuqy0rgh\":\"B41|Sicilian Defense: Kan Variation, Maróczy Bind, Bronstein Variation\",\"zkk189no0q\":\"B41|Sicilian Defense: Kan Variation, Maróczy Bind, Bronstein Variation\",\"bjkxnub5tm\":\"B41|Sicilian Defense: Kan Variation, Maróczy Bind, Hedgehog Variation\",\"1jm4j9ghb7u\":\"B41|Sicilian Defense: Kan Variation, Maróczy Bind, Réti Variation\",\"1wy4t1oxgi1\":\"B42|Sicilian Defense: Kan Variation, Gipslis Variation\",\"m39nv42pxm\":\"B42|Sicilian Defense: Kan Variation, Modern Variation\",\"5ws2zdlhhy\":\"B42|Sicilian Defense: Kan Variation, Polugaevsky Variation\",\"1kck6gzn4mr\":\"B42|Sicilian Defense: Kan Variation, Swiss Cheese Variation\",\"glw6vv7r41\":\"B43|Sicilian Defense: Kan Variation, Knight Variation\",\"14c9lad38h5\":\"B43|Sicilian Defense: Kan Variation, Knight Variation\",\"24qi3hwe879\":\"B43|Sicilian Defense: Kan Variation, Wing Attack\",\"1f03tdmw8j7\":\"B43|Sicilian Defense: Kan Variation, Wing Attack, Christiansen's Dream\",\"1108z95gcin\":\"B43|Sicilian Defense: Kan Variation, Wing Attack, Spraggett Attack\",\"2g2g40duylj\":\"B44|Sicilian Defense: Taimanov Variation\",\"1aqru2ohxrc\":\"B44|Sicilian Defense: Taimanov Variation, Gary Gambit\",\"2b08muimbna\":\"B44|Sicilian Defense: Taimanov Variation, Modern Line\",\"1yxsl6gmihg\":\"B44|Sicilian Defense: Taimanov Variation, Szén Variation\",\"14asdv1fj2p\":\"B45|Sicilian Defense: Four Knights Variation\",\"25ja6uatb7g\":\"B45|Sicilian Defense: Four Knights Variation, American Attack\",\"1rjctou732l\":\"B45|Sicilian Defense: Four Knights Variation, Cobra Variation\",\"1029rdhnw2t\":\"B45|Sicilian Defense: Four Knights Variation, Exchange Variation\",\"7grbxip1u\":\"B45|Sicilian Defense: Four Knights Variation, Sveshnikov Transfer\",\"2c8magx23gb\":\"B45|Sicilian Defense: Taimanov Variation\",\"22ypivudpt7\":\"B46|Sicilian Defense: Taimanov Variation\",\"1pdnthdbdz1\":\"B47|Sicilian Defense: Taimanov Variation, Bastrikov Variation\",\"ugudsdepz4\":\"B47|Sicilian Defense: Taimanov Variation, Bastrikov Variation, Ponomariov Gambit\",\"1myl4fq849o\":\"B48|Sicilian Defense: Taimanov Variation, Bastrikov Variation, English Attack\",\"fz4o1hfmbq\":\"B49|Sicilian Defense: Taimanov Variation, Bastrikov Variation\",\"221n90nchxm\":\"B50|Sicilian Defense\",\"5lutc4sjx2\":\"B50|Sicilian Defense\",\"1cxhi1ra6u\":\"B50|Sicilian Defense: Delayed Alapin Variation, Basman-Palatnik Double Gambit\",\"1i52zv074oq\":\"B50|Sicilian Defense: Delayed Alapin Variation, Basman-Palatnik Gambit\",\"14tr7y3593r\":\"B50|Sicilian Defense: Delayed Alapin Variation, with d6\",\"m2l40o8m6x\":\"B50|Sicilian Defense: Kopec System\",\"29unw09h0h8\":\"B50|Sicilian Defense: Kotov Gambit\",\"1klw7yy0i9l\":\"B50|Sicilian Defense: Modern Variations\",\"23zohjv4ac3\":\"B50|Sicilian Defense: Modern Variations, Anti-Qxd4 Move Order\",\"1x2288e229o\":\"B50|Sicilian Defense: Modern Variations, Anti-Qxd4 Move Order Accepted\",\"21xovn9ya51\":\"B50|Sicilian Defense: Modern Variations, Tartakower\",\"uxorfuc0ip\":\"B50|Sicilian Defense: Wing Gambit, Deferred Variation\",\"1734azo5xx2\":\"B51|Sicilian Defense: Moscow Variation\",\"uv3viwdrvu\":\"B51|Sicilian Defense: Moscow Variation, Dorfman Gambit\",\"1e1slsgkmqh\":\"B51|Sicilian Defense: Moscow Variation, Moscow Gambit\",\"1lm9zqv7h3i\":\"B52|Sicilian Defense: Moscow Variation, Haag Gambit\",\"f50vbg8u5p\":\"B52|Sicilian Defense: Moscow Variation, Main Line\",\"4vg7yu5nbc\":\"B52|Sicilian Defense: Moscow Variation, Sokolsky Variation\",\"1cbo5hkht4c\":\"B53|Sicilian Defense: Chekhover Variation\",\"14mbjdotlua\":\"B53|Sicilian Defense: Chekhover Variation, Zaitsev Defense\",\"1qg34bn2whe\":\"B54|Sicilian Defense: Dragon Variation, Accelerated Dragon\",\"1x3ag2rtej9\":\"B54|Sicilian Defense: Modern Variations, Ginsberg Gambit\",\"3j5aqb8obr\":\"B54|Sicilian Defense: Modern Variations, Main Line\",\"153y6dbctim\":\"B54|Sicilian Defense: Prins Variation\",\"ceuv7g3o5l\":\"B55|Sicilian Defense: Prins Variation, Venice Attack\",\"1par1l2m8ua\":\"B56|Sicilian Defense: Classical Variation\",\"c3o2ro7s83\":\"B56|Sicilian Defense: Classical Variation, Fianchetto Variation\",\"gzjkkzlefk\":\"B56|Sicilian Defense: Kupreichik Variation\",\"xb0lfrx1yu\":\"B56|Sicilian Defense: Spielmann Variation\",\"1jmie82eltm\":\"B56|Sicilian Defense: Venice Attack\",\"v9o9oe5idw\":\"B57|Sicilian Defense: Classical Variation, Anti-Sozin Variation\",\"5u1047fdqc\":\"B57|Sicilian Defense: Classical Variation, Sozin Attack\",\"fwl5czb7nj\":\"B57|Sicilian Defense: Magnus Smith Trap\",\"o3irvixujj\":\"B58|Sicilian Defense: Boleslavsky Variation\",\"22r2yd451ob\":\"B58|Sicilian Defense: Boleslavsky Variation, Louma Variation\",\"ignt4c6wf\":\"B58|Sicilian Defense: Classical Variation\",\"26bqhwjmm07\":\"B58|Sicilian Defense: Classical Variation, Dragon Transfer\",\"u815901h2w\":\"B59|Sicilian Defense: Boleslavsky Variation\",\"pxejysj9q\":\"B60|Sicilian Defense: Richter-Rauzer Variation\",\"6946gcfbnz\":\"B60|Sicilian Defense: Richter-Rauzer Variation, Dragon Variation\",\"c9rtmbqics\":\"B60|Sicilian Defense: Richter-Rauzer Variation, Modern Variation\",\"9bxi4ff7sb\":\"B61|Sicilian Defense: Richter-Rauzer Variation, Modern Variation\",\"204zys8sw27\":\"B62|Sicilian Defense: Richter-Rauzer Variation\",\"cvp5nc3x59\":\"B62|Sicilian Defense: Richter-Rauzer Variation\",\"p9olcg7emw\":\"B62|Sicilian Defense: Richter-Rauzer Variation, Exchange Variation\",\"9eqqu31ko9\":\"B62|Sicilian Defense: Richter-Rauzer Variation, Podebrady Variation\",\"2bsewwpn604\":\"B62|Sicilian Defense: Richter-Rauzer Variation, Vitolins Variation\",\"278ozusnlxq\":\"B63|Sicilian Defense: Richter-Rauzer Variation, Classical Variation\",\"1lchxpjq17j\":\"B63|Sicilian Defense: Richter-Rauzer Variation, Classical Variation, Kantscher Line\",\"tj2wb3imwp\":\"B63|Sicilian Defense: Richter-Rauzer Variation, Ivanov Variation\",\"17j25ohkpg8\":\"B63|Sicilian Defense: Richter-Rauzer Variation, Traditional Variation\",\"k2frre1z94\":\"B64|Sicilian Defense: Richter-Rauzer Variation, Classical Variation\",\"8pbnq0am2z\":\"B64|Sicilian Defense: Richter-Rauzer Variation, Classical Variation\",\"22iebf3hxxb\":\"B65|Sicilian Defense: Richter-Rauzer Variation, Classical Variation\",\"2biauod18f3\":\"B65|Sicilian Defense: Richter-Rauzer Variation, Rauzer Attack\",\"66yu6gbky1\":\"B66|Sicilian Defense: Richter-Rauzer Variation, Neo-Modern Variation, Early Deviations\",\"21nfpppjxma\":\"B67|Sicilian Defense: Richter-Rauzer Variation, Neo-Modern Variation\",\"10vy7eqr6z5\":\"B68|Sicilian Defense: Richter-Rauzer Variation, Neo-Modern Variation\",\"1qe3h9xpwv5\":\"B69|Sicilian Defense: Richter-Rauzer Variation, Neo-Modern Variation, Nyezhmetdinov Attack\",\"zqsocntek0\":\"B70|Sicilian Defense: Dragon Variation\",\"16bhszwb9cr\":\"B70|Sicilian Defense: Dragon Variation, Classical Variation\",\"1bebpr7197k\":\"B70|Sicilian Defense: Dragon Variation, Fianchetto Variation\",\"grwvkmbf4v\":\"B71|Sicilian Defense: Dragon Variation, Levenfish Variation\",\"1obks3ys5sa\":\"B71|Sicilian Defense: Dragon Variation, Levenfish Variation, Main Line\",\"3xq4vu3ol7\":\"B72|Sicilian Defense: Dragon Variation\",\"1u5vevodkg4\":\"B72|Sicilian Defense: Dragon Variation, Classical Variation\",\"1g32oxs9ta6\":\"B72|Sicilian Defense: Dragon Variation, Classical Variation\",\"1r23bqdqxk7\":\"B72|Sicilian Defense: Dragon Variation, Classical Variation\",\"1w5hq608m9k\":\"B72|Sicilian Defense: Dragon Variation, Classical Variation, Amsterdam Variation\",\"13wozl2mb7\":\"B72|Sicilian Defense: Dragon Variation, Classical Variation, Grigoriev Variation\",\"7nstund6tr\":\"B73|Sicilian Defense: Dragon Variation, Classical Variation\",\"1tooas28oan\":\"B73|Sicilian Defense: Dragon Variation, Classical Variation, Battery Variation\",\"1u7d6lprcb8\":\"B73|Sicilian Defense: Dragon Variation, Classical Variation, Zollner Gambit\",\"kwmdy3tvdm\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Alekhine Line\",\"1030z3iyijx\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Bernard Defense\",\"193gx6waxlq\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Maróczy Line\",\"22t81myung7\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Normal Line\",\"gu0a2izimq\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Spielmann Variation\",\"h6o2zc3tvh\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Stockholm Attack\",\"zs4uyxddfc\":\"B74|Sicilian Defense: Dragon Variation, Classical Variation, Tartakower Line\",\"1qm55g3e421\":\"B75|Sicilian Defense: Dragon Variation, Yugoslav Attack, Belezky Line\",\"xewz82u82n\":\"B75|Sicilian Defense: Dragon Variation, Yugoslav Attack, Early Deviations\",\"1xn4mj89bm3\":\"B75|Sicilian Defense: Dragon Variation, Yugoslav Attack, Hungarian Dragon\",\"1i34u9xu90n\":\"B76|Sicilian Defense: Dragon Variation, Yugoslav Attack\",\"13awnrbexd1\":\"B76|Sicilian Defense: Dragon Variation, Yugoslav Attack\",\"1333e57b8t0\":\"B76|Sicilian Defense: Dragon Variation, Yugoslav Attack, Modern Line\",\"1mxjuymj1tl\":\"B76|Sicilian Defense: Dragon Variation, Yugoslav Attack, Panov Variation\",\"1ul109ws1gh\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Byrne Variation\",\"1y5lsc922jd\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Czerniak Variation\",\"v4j1z5hblz\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Czerniak Variation\",\"g9206ktszl\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Main Line\",\"19ysf2u19fg\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Main Line\",\"1h41ihali0k\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Main Line\",\"1ubkwdx5ni3\":\"B77|Sicilian Defense: Dragon Variation, Yugoslav Attack, Sosonko Variation\",\"15um8tm01om\":\"B78|Sicilian Defense: Dragon Variation, Yugoslav Attack\",\"1eqrxy6k95z\":\"B78|Sicilian Defense: Dragon Variation, Yugoslav Attack, Chinese Dragon\",\"294hrbinvm9\":\"B78|Sicilian Defense: Dragon Variation, Yugoslav Attack, Old Line\",\"1fv08h8fzbp\":\"B78|Sicilian Defense: Dragon Variation, Yugoslav Attack, Topalov Variation\",\"2c4yu78k40x\":\"B79|Sicilian Defense: Dragon Variation, Yugoslav Attack\",\"152upor7wi0\":\"B79|Sicilian Defense: Dragon Variation, Yugoslav Attack, Soltis Variation\",\"36pp8b1txh\":\"B80|Sicilian Defense: Scheveningen Variation\",\"1y8248bbng0\":\"B80|Sicilian Defense: Scheveningen Variation, English Attack, with Qd2\",\"29e69vvpbdi\":\"B80|Sicilian Defense: Scheveningen Variation, Fianchetto Variation\",\"hcp7pgea8r\":\"B80|Sicilian Defense: Scheveningen Variation, Vitolins Variation\",\"2b3ifvxr29a\":\"B81|Sicilian Defense: Scheveningen Variation, Keres Attack\",\"1q3ahl5iez6\":\"B82|Sicilian Defense: Scheveningen Variation, Matanovic Attack\",\"2e8ksg1y874\":\"B82|Sicilian Defense: Scheveningen Variation, Tal Variation\",\"1q5h1hxsejb\":\"B83|Sicilian Defense: Scheveningen Variation, Classical Variation\",\"7u571oid9w\":\"B83|Sicilian Defense: Scheveningen Variation, Modern Variation\",\"9gj2vuszcs\":\"B83|Sicilian Defense: Scheveningen Variation, Modern Variation\",\"l89o9wfvzm\":\"B83|Sicilian Defense: Scheveningen Variation, Modern Variation\",\"2g9k1ljdk87\":\"B84|Sicilian Defense: Najdorf Variation, Scheveningen Variation\",\"gfrkkq85m9\":\"B84|Sicilian Defense: Scheveningen Variation, Classical Variation\",\"1o64gq5rsza\":\"B84|Sicilian Defense: Scheveningen Variation, Classical Variation\",\"19of4igan0s\":\"B85|Sicilian Defense: Scheveningen Variation, Classical Main Line\",\"v7bdru5d35\":\"B85|Sicilian Defense: Scheveningen Variation, Classical Variation, Paulsen Variation\",\"1aruplae1kt\":\"B85|Sicilian Defense: Scheveningen Variation, Classical Variation, Paulsen Variation\",\"1twxvssdlux\":\"B85|Sicilian Defense: Scheveningen Variation, Classical Variation, Paulsen Variation\",\"1ocsylov476\":\"B86|Sicilian Defense: Sozin Attack\",\"1grjv2boncx\":\"B87|Sicilian Defense: Sozin Attack, Flank Variation\",\"26x7y88r68q\":\"B88|Sicilian Defense: Sozin Attack, Fischer Variation\",\"1bf0vlzml6v\":\"B88|Sicilian Defense: Sozin Attack, Leonhardt Variation\",\"18oucufk65w\":\"B89|Sicilian Defense: Sozin Attack, Main Line\",\"210uyionpj9\":\"B89|Sicilian Defense: Sozin Attack, Main Line, Sherbakov Variation\",\"1nxmhhncl7w\":\"B89|Sicilian Defense: Velimirovic Attack\",\"168he6toh51\":\"B90|Sicilian Defense: Najdorf Variation\",\"1w9wpijszbd\":\"B90|Sicilian Defense: Najdorf Variation, Adams Attack\",\"2q7tsa3l59\":\"B90|Sicilian Defense: Najdorf Variation, Dekker Gambit\",\"2do07ztxaoj\":\"B90|Sicilian Defense: Najdorf Variation, English Attack\",\"1tcqs11lmm7\":\"B90|Sicilian Defense: Najdorf Variation, English Attack\",\"pecmlr6i3y\":\"B90|Sicilian Defense: Najdorf Variation, English Attack\",\"tkkffx0iuj\":\"B90|Sicilian Defense: Najdorf Variation, English Attack\",\"etu5d7rzft\":\"B90|Sicilian Defense: Najdorf Variation, English Attack\",\"1zxpnqwa05n\":\"B90|Sicilian Defense: Najdorf Variation, English Attack, Anti-English\",\"a6spmv8hp2\":\"B90|Sicilian Defense: Najdorf Variation, Lipnitsky Attack\",\"8tt4b2981f\":\"B90|Sicilian Defense: Najdorf Variation, Petronić Attack\",\"cjsd93ku1n\":\"B90|Sicilian Defense: Najdorf Variation, Yates Variation\",\"txzii9dxoi\":\"B90|Sicilian Defense: Scheveningen Variation, Delayed Keres Attack\",\"kl1dwo206r\":\"B90|Sicilian Defense: Scheveningen Variation, Delayed Keres Attack, Perenyi Gambit\",\"2dxojwurefc\":\"B90|Sicilian Defense: Scheveningen Variation, English Attack, with f3\",\"77rq178bz7\":\"B91|Sicilian Defense: Najdorf Variation, Zagreb Variation\",\"2egy2whbk8t\":\"B92|Sicilian Defense: Najdorf Variation, Opocensky Variation\",\"d2q1i4g4nd\":\"B92|Sicilian Defense: Najdorf Variation, Opocensky Variation\",\"1ugt1fdrdia\":\"B92|Sicilian Defense: Najdorf Variation, Opocensky Variation, Modern Line\",\"t9ikyongc1\":\"B92|Sicilian Defense: Najdorf Variation, Opocensky Variation, Traditional Line\",\"z647dr4xts\":\"B93|Sicilian Defense: Najdorf Variation, Amsterdam Variation\",\"2ftx3qb5vca\":\"B94|Sicilian Defense: Najdorf Variation\",\"ftz4kzo2ex\":\"B94|Sicilian Defense: Najdorf Variation, Ivkov Variation\",\"ln8gv3v25j\":\"B95|Sicilian Defense: Najdorf Variation\",\"1x4qfz66x5r\":\"B96|Sicilian Defense: Najdorf Variation\",\"1sbi8le30jl\":\"B96|Sicilian Defense: Najdorf Variation, Neo-Classical Defense\",\"156xq7jlexg\":\"B96|Sicilian Defense: Najdorf Variation, Polugaevsky Variation\",\"s9pd4e7sp3\":\"B96|Sicilian Defense: Najdorf Variation, Polugaevsky Variation, Simagin Line\",\"23ga8b69zt4\":\"B97|Sicilian Defense: Najdorf Variation, Poisoned Pawn Accepted\",\"2fffc0t38q6\":\"B97|Sicilian Defense: Najdorf Variation, Poisoned Pawn Variation\",\"1fvar7ie7cy\":\"B98|Sicilian Defense: Najdorf Variation\",\"162kqm0k6s4\":\"B98|Sicilian Defense: Najdorf Variation, Browne Variation\",\"1onzgiri91g\":\"B98|Sicilian Defense: Najdorf Variation, Goteborg Variation\",\"8jygvtoamq\":\"B98|Sicilian Defense: Najdorf Variation, Traditional Line\",\"29baqqaab3q\":\"B99|Sicilian Defense: Najdorf Variation, Main Line\",\"fvwycrith1\":\"C00|French Defense\",\"1c6ucbyopxt\":\"C00|French Defense\",\"j7d33g7j8k\":\"C00|French Defense: Alapin Gambit\",\"1a3kvg0y8wh\":\"C00|French Defense: Baeuerle Gambit\",\"78o8mkbkk5\":\"C00|French Defense: Banzai-Leong Gambit\",\"ekp6snh1wq\":\"C00|French Defense: Banzai-Leong Gambit, Pinova Gambit\",\"1nuch3riulb\":\"C00|French Defense: Bird Invitation\",\"wtzuifaun0\":\"C00|French Defense: Carlson Gambit\",\"14rai0vjlr9\":\"C00|French Defense: Chigorin Variation\",\"4zivhvq9e0\":\"C00|French Defense: Diemer-Duhm Gambit\",\"wsxsj0fcde\":\"C00|French Defense: Diemer-Duhm Gambit Accepted\",\"26v5dwjjhfd\":\"C00|French Defense: Franco-Hiva Gambit\",\"17991e3xvoi\":\"C00|French Defense: Franco-Hiva Gambit Accepted\",\"idtzfly28c\":\"C00|French Defense: Franco-Sicilian Defense\",\"1oo3kb4thhc\":\"C00|French Defense: Hoffmann Gambit\",\"uxi3jpc42y\":\"C00|French Defense: Horwitz Attack\",\"ayaww7mclc\":\"C00|French Defense: Horwitz Attack, Papa-Ticulat Gambit\",\"1pxldhvt84u\":\"C00|French Defense: King's Indian Attack\",\"1jrxta5uqr9\":\"C00|French Defense: King's Indian Attack, Franco-Hiva Gambit\",\"cu9fj7gc53\":\"C00|French Defense: Knight Variation\",\"28k9b8twsyo\":\"C00|French Defense: Knight Variation, Franco-Hiva Gambit\",\"9b1t9qr651\":\"C00|French Defense: La Bourdonnais Variation\",\"m1cetofn10\":\"C00|French Defense: La Bourdonnais Variation, Reuter Gambit\",\"2a4rsb5lf1r\":\"C00|French Defense: Mediterranean Defense\",\"8ebkyqwm5p\":\"C00|French Defense: Morphy Gambit\",\"jsdogw3eq7\":\"C00|French Defense: Normal Variation\",\"1rwoznaroxr\":\"C00|French Defense: Orthoschnapp Gambit\",\"1jv0grr38v9\":\"C00|French Defense: Pelikan Variation\",\"f7hvx7usxq\":\"C00|French Defense: Perseus Gambit\",\"13mmtxhc9dk\":\"C00|French Defense: Queen's Knight\",\"1jmo6g08lfl\":\"C00|French Defense: Reversed Philidor Formation\",\"20idfr4lq13\":\"C00|French Defense: Réti-Spielmann Attack\",\"15lfgdcib85\":\"C00|French Defense: Schlechter Variation\",\"21bl9fgyy33\":\"C00|French Defense: St. George Defense\",\"9n5fvfkh3z\":\"C00|French Defense: St. George Defense, Sanky-George Gambit\",\"ssuwlwd53k\":\"C00|French Defense: St. George Defense, St. George Gambit\",\"2g0djj904ke\":\"C00|French Defense: St. George Defense, Three Pawn Attack\",\"2ammfmmoqyr\":\"C00|French Defense: St. George Defense, Traditional Line\",\"2cjdnzzosn8\":\"C00|French Defense: Steiner Variation\",\"137ooahup64\":\"C00|French Defense: Steinitz Attack\",\"1e04yo2uw3g\":\"C00|French Defense: Two Knights Variation\",\"n32q395b8y\":\"C00|French Defense: Wing Gambit\",\"1052m6ymwqp\":\"C00|Rat Defense: Small Center Defense\",\"1anugzez59c\":\"C01|French Defense: Exchange Variation\",\"1sjtlzugsnw\":\"C01|French Defense: Exchange Variation\",\"y7alb7hln\":\"C01|French Defense: Exchange Variation\",\"117lchqi3dh\":\"C01|French Defense: Exchange Variation, Bogoljubow Variation\",\"wkka7n84gv\":\"C01|French Defense: Exchange Variation, Monte Carlo Variation\",\"13lcrk2jt48\":\"C01|French Defense: Exchange Variation, Svenonius Variation\",\"fujjumc1kc\":\"C02|French Defense: Advance Variation\",\"15sjxopj77h\":\"C02|French Defense: Advance Variation\",\"18wh6ad7lvd\":\"C02|French Defense: Advance Variation\",\"luhrx6mrrf\":\"C02|French Defense: Advance Variation\",\"13le7ptpwiq\":\"C02|French Defense: Advance Variation, Euwe Variation\",\"1imz33gb1bv\":\"C02|French Defense: Advance Variation, Extended Bishop Swap\",\"zcaiet9b1v\":\"C02|French Defense: Advance Variation, Frenkel Gambit\",\"1iuuujpa40\":\"C02|French Defense: Advance Variation, Kupreichik Variation\",\"10wy7p3op3d\":\"C02|French Defense: Advance Variation, Lputian Variation\",\"fnrpwhzbyx\":\"C02|French Defense: Advance Variation, Main Line\",\"ns0y7lqlh9\":\"C02|French Defense: Advance Variation, Milner-Barry Gambit\",\"i949x0s1cp\":\"C02|French Defense: Advance Variation, Milner-Barry Gambit, Hector Variation\",\"251kog9kvlr\":\"C02|French Defense: Advance Variation, Milner-Barry Gambit, Hector Variation\",\"2165wpxbpx5\":\"C02|French Defense: Advance Variation, Milner-Barry Gambit, Main Line\",\"1drleb61nid\":\"C02|French Defense: Advance Variation, Milner-Barry Gambit, Sørensen Variation\",\"2478zass5h\":\"C02|French Defense: Advance Variation, Nimzowitsch Attack\",\"2bet7uf14ba\":\"C02|French Defense: Advance Variation, Nimzowitsch Gambit\",\"10qqo8p9vxs\":\"C02|French Defense: Advance Variation, Nimzowitsch System\",\"1t29vnmh0o6\":\"C02|French Defense: Advance Variation, Paulsen Attack\",\"nahvs1puw8\":\"C02|French Defense: Advance Variation, Ruisdonk Gambit\",\"19dnl6rs3b4\":\"C02|French Defense: Advance Variation, Steinitz Variation\",\"2g92anm7gqt\":\"C02|French Defense: Advance Variation, Wade Variation\",\"1i2dn9odux2\":\"C03|French Defense: Tarrasch Variation\",\"15badhsmhuw\":\"C03|French Defense: Tarrasch Variation, Guimard Defense\",\"163ve4yxr50\":\"C03|French Defense: Tarrasch Variation, Guimard Defense, Thunderbunny Variation\",\"2cgvjr7offx\":\"C03|French Defense: Tarrasch Variation, Haberditz Variation\",\"hrmnl15guc\":\"C03|French Defense: Tarrasch Variation, Modern System\",\"1tuzo72eg5k\":\"C03|French Defense: Tarrasch Variation, Morozevich Variation\",\"iu23myetx2\":\"C04|French Defense: Tarrasch Variation, Guimard Defense, Main Line\",\"jdo88j7kuc\":\"C05|French Defense: Tarrasch Variation, Botvinnik Variation\",\"h9oniz5s08\":\"C05|French Defense: Tarrasch Variation, Closed Variation\",\"2gfbhu57vts\":\"C05|French Defense: Tarrasch Variation, Closed Variation\",\"edqj7anxjo\":\"C05|French Defense: Tarrasch Variation, Pawn Center Variation\",\"2ftvn381pme\":\"C06|French Defense: Tarrasch Variation, Closed Variation, Main Line\",\"1z7yabuamro\":\"C06|French Defense: Tarrasch Variation, Leningrad Variation\",\"20o3dijn6kx\":\"C07|French Defense: Tarrasch Variation, Chistyakov Defense\",\"c31m6k1aj0\":\"C07|French Defense: Tarrasch Variation, Chistyakov Defense, Modern Line\",\"8gwowkdnqv\":\"C07|French Defense: Tarrasch Variation, Eliskases Variation\",\"27wfhczxqc0\":\"C07|French Defense: Tarrasch Variation, Open System\",\"1ndi4nrwrde\":\"C07|French Defense: Tarrasch Variation, Open System, Euwe-Keres Line\",\"ra8auxx0vv\":\"C07|French Defense: Tarrasch Variation, Open System, Shaposhnikov Gambit\",\"1rzq6q2qlok\":\"C07|French Defense: Tarrasch Variation, Open System, Süchting Line\",\"t9ilpqg0yk\":\"C08|French Defense: Tarrasch Variation, Open System\",\"miqd3p95vp\":\"C08|French Defense: Tarrasch Variation, Open System, Advance Line\",\"1v4y801wz2n\":\"C09|French Defense: Tarrasch Variation, Open System, Main Line\",\"134gzaighaj\":\"C09|French Defense: Tarrasch Variation, Open System, Main Line\",\"mjdpqinr1f\":\"C10|French Defense: Hecht-Reefschläger Variation\",\"23ytsrqc3n7\":\"C10|French Defense: Marshall Gambit\",\"60iu73mkmb\":\"C10|French Defense: Paulsen Variation\",\"khtvlveghs\":\"C10|French Defense: Rubinstein Variation\",\"23nw0o1xq6u\":\"C10|French Defense: Rubinstein Variation, Blackburne Defense\",\"1u33tpxd9cv\":\"C10|French Defense: Rubinstein Variation, Capablanca Line\",\"11h8j6dbj9j\":\"C10|French Defense: Rubinstein Variation, Ellis Gambit\",\"co195zik7k\":\"C10|French Defense: Rubinstein Variation, Fort Knox Variation\",\"n81988bska\":\"C10|French Defense: Rubinstein Variation, Kasparov Attack\",\"1i7lvhxo6gr\":\"C10|French Defense: Rubinstein Variation, Maric Variation\",\"1wpi5noigxv\":\"C11|French Defense: Classical Variation\",\"1siqry4izha\":\"C11|French Defense: Classical Variation, Delayed Exchange Variation\",\"2cgbg1qgzmp\":\"C11|French Defense: Classical Variation, Shirov-Anand Variation\",\"lcjoyy7du1\":\"C11|French Defense: Classical Variation, Steinitz Variation\",\"1ctssamuzms\":\"C11|French Defense: Classical Variation, Swiss Variation\",\"19m7dlf5zwh\":\"C11|French Defense: Henneberger Variation\",\"qsbx5u1edo\":\"C11|French Defense: Steinitz Variation\",\"1i9zr50xvw3\":\"C11|French Defense: Steinitz Variation\",\"b9ckce2pxw\":\"C11|French Defense: Steinitz Variation\",\"1gamc3sunob\":\"C11|French Defense: Steinitz Variation\",\"1cyz6eowc1u\":\"C11|French Defense: Steinitz Variation\",\"8hv9ovwzog\":\"C11|French Defense: Steinitz Variation, Boleslavsky Variation\",\"ft564ahd6d\":\"C11|French Defense: Steinitz Variation, Bradford Attack Variation\",\"25kvfyy3p9d\":\"C11|French Defense: Steinitz Variation, Brodsky-Jones Variation\",\"ew68xge7b2\":\"C11|French Defense: Steinitz Variation, Gledhill Attack\",\"2g9j5wdonl1\":\"C12|French Defense: Classical, 4. Bg5\",\"22kzwuaaj1i\":\"C12|French Defense: McCutcheon Variation\",\"6ty6u2splj\":\"C12|French Defense: McCutcheon Variation, Advance Variation\",\"1jxlrftxelf\":\"C12|French Defense: McCutcheon Variation, Bernstein Variation\",\"i4do6g4g23\":\"C12|French Defense: McCutcheon Variation, Bogoljubow Variation\",\"145hqt9uxf4\":\"C12|French Defense: McCutcheon Variation, Chigorin Variation\",\"28k72ue6ae2\":\"C12|French Defense: McCutcheon Variation, Dr. Olland Variation\",\"l1qbgusl30\":\"C12|French Defense: McCutcheon Variation, Duras Variation\",\"12coeq17lqg\":\"C12|French Defense: McCutcheon Variation, Exchange Variation\",\"1d4b3hz9bb1\":\"C12|French Defense: McCutcheon Variation, Grigoriev Variation\",\"fb6l1tw3q6\":\"C12|French Defense: McCutcheon Variation, Janowski Variation\",\"1tm5rccwe0o\":\"C12|French Defense: McCutcheon Variation, Lasker Variation\",\"2oq93mlsij\":\"C12|French Defense: McCutcheon Variation, Lasker Variation\",\"q10ti8jtoo\":\"C12|French Defense: McCutcheon Variation, Tartakower Variation\",\"ps0ov98de5\":\"C13|French Defense: Alekhine-Chatard Attack\",\"2d7gyscl3o0\":\"C13|French Defense: Alekhine-Chatard Attack, Albin-Chatard Gambit\",\"1rzcu5i3c22\":\"C13|French Defense: Alekhine-Chatard Attack, Breyer Variation\",\"15z39b8s6ue\":\"C13|French Defense: Alekhine-Chatard Attack, Maróczy Variation\",\"1dd8rdt818s\":\"C13|French Defense: Alekhine-Chatard Attack, Spielmann Variation\",\"no8wdh3zcp\":\"C13|French Defense: Alekhine-Chatard Attack, Teichmann Variation\",\"ltgoogibn9\":\"C13|French Defense: Classical Variation\",\"1hibnz08p0g\":\"C13|French Defense: Classical Variation, Burn Variation\",\"5kfpkbynk9\":\"C13|French Defense: Classical Variation, Burn Variation, Main Line\",\"20h1zony5c1\":\"C13|French Defense: Classical Variation, Burn Variation, Morozevich Line\",\"25qujvmyvf4\":\"C13|French Defense: Classical Variation, Frankfurt Variation\",\"f55968g0bo\":\"C13|French Defense: Classical Variation, Normal Variation\",\"egv3snaq7x\":\"C13|French Defense: Classical Variation, Richter Attack\",\"2elyj5pkl6d\":\"C13|French Defense: Classical Variation, Richter Attack\",\"1hqhozcs891\":\"C13|French Defense: Classical Variation, Tartakower Variation\",\"f0awr06gke\":\"C13|French Defense: Classical Variation, Vistaneckis Variation\",\"1tyi42f4j4k\":\"C14|French Defense: Classical Variation\",\"2a2fj0v17cr\":\"C14|French Defense: Classical Variation\",\"1aewst50v46\":\"C14|French Defense: Classical Variation, Alapin Variation\",\"1tsze4wz4nj\":\"C14|French Defense: Classical Variation, Pollock Variation\",\"1xr6zd1tda0\":\"C14|French Defense: Classical Variation, Rubinstein Variation\",\"4dad2e4u97\":\"C14|French Defense: Classical Variation, Stahlberg Variation\",\"7cror4a9jj\":\"C14|French Defense: Classical Variation, Steinitz Variation\",\"l0hyohb3bl\":\"C14|French Defense: Classical Variation, Tarrasch Variation\",\"t6uk8swwcr\":\"C15|French Defense: McCutcheon Variation, Wolf Gambit\",\"645xv0jq2o\":\"C15|French Defense: Winawer Variation\",\"2tfrcz3q8l\":\"C15|French Defense: Winawer Variation, Alekhine Gambit Accepted\",\"v2ff9x4zas\":\"C15|French Defense: Winawer Variation, Alekhine Gambit, Alatortsev Variation\",\"236un4thpb9\":\"C15|French Defense: Winawer Variation, Alekhine Gambit, Kan Variation\",\"139io3t2uro\":\"C15|French Defense: Winawer Variation, Alekhine-Maróczy Gambit\",\"oknybqtv7o\":\"C15|French Defense: Winawer Variation, Delayed Exchange Variation\",\"1g5u0mddm85\":\"C15|French Defense: Winawer Variation, Exchange Variation, Canal Attack\",\"76d2zuq9jt\":\"C15|French Defense: Winawer Variation, Fingerslip Variation\",\"xxyqcmpout\":\"C15|French Defense: Winawer Variation, Fingerslip Variation, Kunin Double Gambit\",\"20wy0bbb43v\":\"C15|French Defense: Winawer Variation, Fingerslip Variation, Main Line\",\"iaer0y95pw\":\"C15|French Defense: Winawer Variation, Fingerslip Variation, Schwarz's Line\",\"1s6i5f69d97\":\"C15|French Defense: Winawer Variation, Kondratiyev Variation\",\"oph0c834xa\":\"C15|French Defense: Winawer Variation, Winckelmann-Reimer Gambit\",\"7ff9v8lrn2\":\"C16|French Defense: Winawer Variation, Advance Variation\",\"5e1pp52z1r\":\"C16|French Defense: Winawer Variation, Petrosian Variation\",\"78a7t3s3e6\":\"C17|French Defense: Winawer Variation, Advance Variation\",\"vt78dkjzwz\":\"C17|French Defense: Winawer Variation, Advance Variation\",\"1vp75afe02v\":\"C17|French Defense: Winawer Variation, Advance Variation\",\"99ts9ihudr\":\"C17|French Defense: Winawer Variation, Advance Variation, Moscow Variation\",\"2c3kk4p22s1\":\"C17|French Defense: Winawer Variation, Bogoljubow Variation\",\"s99vuiaevx\":\"C17|French Defense: Winawer Variation, Bogoljubow Variation, Icelandic Defense\",\"1to08784e2d\":\"C17|French Defense: Winawer Variation, Maróczy-Wallis Variation\",\"1oqihavh9k1\":\"C17|French Defense: Winawer Variation, Retreat Variation\",\"1k9tfkqv8sg\":\"C17|French Defense: Winawer Variation, Retreat Variation, Armenian Line\",\"g6jlza7j7h\":\"C18|French Defense: Winawer Variation, Advance Variation\",\"12u4kc3gylf\":\"C18|French Defense: Winawer Variation, Advance Variation\",\"g0z5xl6hgb\":\"C18|French Defense: Winawer Variation, Advance Variation, with Bd3\",\"qwanfw95al\":\"C18|French Defense: Winawer Variation, Advance Variation, with Bd3\",\"1g483jt8lfo\":\"C18|French Defense: Winawer Variation, Advance Variation, with h4\",\"24fihi1dsci\":\"C18|French Defense: Winawer Variation, Advance Variation, with h4\",\"27zxd9mo3j2\":\"C18|French Defense: Winawer Variation, Classical Variation\",\"14it56dhw3b\":\"C18|French Defense: Winawer Variation, Eingorn Variation\",\"128qx908dlf\":\"C18|French Defense: Winawer Variation, Poisoned Pawn Variation\",\"20a3focahwe\":\"C18|French Defense: Winawer Variation, Poisoned Pawn Variation\",\"28kzhgg781a\":\"C18|French Defense: Winawer Variation, Poisoned Pawn Variation\",\"18gtjs3u9kf\":\"C18|French Defense: Winawer Variation, Poisoned Pawn Variation Declined\",\"1692ya66njp\":\"C18|French Defense: Winawer Variation, Poisoned Pawn Variation, Main Line\",\"2ay9cqu74zj\":\"C18|French Defense: Winawer Variation, Poisoned Pawn Variation, Paoli Variation\",\"226fdod72uv\":\"C18|French Defense: Winawer Variation, Portisch-Hook Variation\",\"1cqqwlpn5ee\":\"C18|French Defense: Winawer Variation, Warsaw Variation\",\"mbwky0valj\":\"C19|French Defense: Winawer Variation, Advance Variation, Smyslov Variation\",\"rrivoq6okb\":\"C19|French Defense: Winawer Variation, Advance Variation, Smyslov Variation\",\"w1hy3gzwr3\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"10qjz12k9r2\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"1obap3fdtfb\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"oinxpzreki\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"11b83teej9n\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"g24gbyjbq5\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"108c757vl2e\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"13e4y92ru5k\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"1ga3pktosxy\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"19wr6fp5ez0\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"15332fc9igi\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"2eaxebkmq2j\":\"C19|French Defense: Winawer Variation, Positional Variation\",\"4h67w5zao4\":\"C20|Barnes Opening: Walkerling\",\"xdr9y9x13i\":\"C20|Bongcloud Attack\",\"2bff9ljh7t3\":\"C20|Center Game\",\"4nw5p1o6c7\":\"C20|English Opening: The Whale\",\"15kof3o79ga\":\"C20|King's Pawn Game\",\"2amjzya405c\":\"C20|King's Pawn Game: Alapin Opening\",\"1filgs76533\":\"C20|King's Pawn Game: Bavarian Gambit\",\"fwod4rlhdw\":\"C20|King's Pawn Game: Beyer Gambit\",\"1gzpqzc56do\":\"C20|King's Pawn Game: Clam Variation, King's Gambit Reversed\",\"pj33tijmj\":\"C20|King's Pawn Game: Clam Variation, Radisch Gambit\",\"1xpnoba2npt\":\"C20|King's Pawn Game: King's Head Opening\",\"8nbm9z30uy\":\"C20|King's Pawn Game: King's Head Opening\",\"16tu0f5ro44\":\"C20|King's Pawn Game: Leonardis Variation\",\"17ivye4h5z9\":\"C20|King's Pawn Game: MacLeod Attack\",\"16mtk6050p1\":\"C20|King's Pawn Game: MacLeod Attack, Lasa Gambit\",\"jyy06v481o\":\"C20|King's Pawn Game: MacLeod Attack, Norwalde Gambit\",\"3xdybjvwbi\":\"C20|King's Pawn Game: Mengarini's Opening\",\"18o0uin3pbm\":\"C20|King's Pawn Game: Napoleon Attack\",\"11uxca7x8ie\":\"C20|King's Pawn Game: Philidor Gambit\",\"wm657c71tg\":\"C20|King's Pawn Game: Tortoise Opening\",\"1fritzdqs7d\":\"C20|King's Pawn Game: Wayward Queen Attack\",\"216l84iuhb1\":\"C20|King's Pawn Game: Wayward Queen Attack, Kiddie Countergambit\",\"rh96au1xz7\":\"C20|King's Pawn Game: Wayward Queen Attack, Mellon Gambit\",\"173kdl2no5r\":\"C20|King's Pawn Game: Weber Gambit\",\"1ys9n6lvkiy\":\"C20|King's Pawn Opening\",\"278puf690xb\":\"C20|King's Pawn Opening: Speers\",\"af5gh27uel\":\"C20|King's Pawn Opening: Van Hooydoon Gambit\",\"1e7o5yb3oe3\":\"C20|Portuguese Opening\",\"28u5j9ccsc7\":\"C20|Portuguese Opening: Miguel Gambit\",\"1ambzb4thop\":\"C20|Portuguese Opening: Portuguese Gambit\",\"1uoou0v0pdb\":\"C21|Center Game\",\"1kbv5b84vhg\":\"C21|Center Game Accepted\",\"5olsj7xs6j\":\"C21|Center Game: Halasz-McDonnell Gambit\",\"1ehhsmmo710\":\"C21|Center Game: Halasz-McDonnell Gambit, Crocodile Variation\",\"1iz3ajxeytm\":\"C21|Center Game: Kieseritzky Variation\",\"277n9xvepxt\":\"C21|Center Game: Kieseritzky Variation\",\"2fwlwshgvrk\":\"C21|Center Game: Kieseritzky Variation\",\"h2ga3dxt2w\":\"C21|Center Game: Lanc-Arnold Gambit\",\"1ybstntxbm8\":\"C21|Center Game: Lanc-Arnold Gambit, Schippler Gambit\",\"22ppnciq81p\":\"C21|Center Game: Ross Gambit\",\"qdqpo0erv1\":\"C21|Center Game: von der Lasa Gambit\",\"1s2q76rj3h9\":\"C21|Danish Gambit\",\"62n0wmgfvm\":\"C21|Danish Gambit Accepted\",\"1ybvhbvdahe\":\"C21|Danish Gambit Accepted: Chigorin Defense\",\"1x6g3wvvv4v\":\"C21|Danish Gambit Accepted: Classical Defense\",\"8v7ee9w3cs\":\"C21|Danish Gambit Accepted: Copenhagen Defense\",\"9lg86evd6n\":\"C21|Danish Gambit Accepted: Schlechter Defense\",\"rqxbiq4ea7\":\"C21|Danish Gambit Accepted: Svenonius Defense\",\"1yyok1ydxjc\":\"C21|Danish Gambit Declined: Sörensen Defense\",\"23xfao0g7fa\":\"C22|Center Game: Berger Variation\",\"7bwwjv0c1v\":\"C22|Center Game: Charousek Variation\",\"5ypc85q970\":\"C22|Center Game: Hall Variation\",\"12qzd4mw5un\":\"C22|Center Game: Kupreichik Variation\",\"20m4ympzmx9\":\"C22|Center Game: Normal Variation\",\"17lxkdedq2v\":\"C22|Center Game: Paulsen Attack Variation\",\"1fidhjbdc45\":\"C22|Center Game: l'Hermet Variation\",\"1nmx4btaahe\":\"C23|Bishop's Opening\",\"1abtxb9y2s0\":\"C23|Bishop's Opening: Anderssen Gambit\",\"xlpwtvfuv0\":\"C23|Bishop's Opening: Boi Variation\",\"21fr6k3zofs\":\"C23|Bishop's Opening: Calabrese Countergambit\",\"24r6w4upumy\":\"C23|Bishop's Opening: Calabrese Countergambit, Jaenisch Variation\",\"jdp6dwciob\":\"C23|Bishop's Opening: Four Pawns Gambit\",\"5javlaqhgk\":\"C23|Bishop's Opening: Khan Gambit\",\"1p2gaepv1on\":\"C23|Bishop's Opening: Lewis Countergambit\",\"1o03drnki7q\":\"C23|Bishop's Opening: Lewis Countergambit\",\"283ypuo88ma\":\"C23|Bishop's Opening: Lewis Countergambit, Walker Variation\",\"c52w9zg6p8\":\"C23|Bishop's Opening: Lewis Gambit\",\"1w5ynmj2r4a\":\"C23|Bishop's Opening: Lisitsyn Variation\",\"12bn2mtwxy9\":\"C23|Bishop's Opening: Lopez Gambit\",\"jszqnfpi64\":\"C23|Bishop's Opening: Lopez Variation\",\"1bppxxwifj9\":\"C23|Bishop's Opening: Lopez Variation, Lopez Gambit\",\"1nnx2jmt7e7\":\"C23|Bishop's Opening: McDonnell Gambit\",\"1ouvtlp3hix\":\"C23|Bishop's Opening: McDonnell Gambit, La Bourdonnais-Denker Gambit\",\"1fqizfb9uox\":\"C23|Bishop's Opening: McDonnell Gambit, McDonnell Double Gambit\",\"1e7yoy0e8rv\":\"C23|Bishop's Opening: Philidor Counterattack\",\"187j113aq00\":\"C23|Bishop's Opening: Philidor Variation\",\"2cs7157farz\":\"C23|Bishop's Opening: Pratt Variation\",\"1pl6jkesm2d\":\"C23|Bishop's Opening: Stein Gambit\",\"1zgffcdvpbq\":\"C23|Bishop's Opening: Thorold Gambit\",\"4j1mhijkhs\":\"C23|Bishop's Opening: del Rio Variation\",\"1gwec02fow\":\"C24|Bishop's Opening: Berlin Defense\",\"178tchpa281\":\"C24|Bishop's Opening: Berlin Defense, Greco Gambit\",\"k1fac11xpl\":\"C24|Bishop's Opening: Kitchener Folly\",\"144p3qcrhh1\":\"C24|Bishop's Opening: Krejcik Gambit\",\"21e4m7cc6tj\":\"C24|Bishop's Opening: Pachman Gambit\",\"psavdzjfnr\":\"C24|Bishop's Opening: Paulsen Defense\",\"21uvc6a1171\":\"C24|Bishop's Opening: Ponziani Gambit\",\"a27untzich\":\"C24|Bishop's Opening: Urusov Gambit, Panov Variation\",\"2d8now71yii\":\"C24|Bishop's Opening: Vienna Hybrid\",\"2e9z7o8up27\":\"C24|Bishop's Opening: Warsaw Gambit\",\"1wz4sj390zd\":\"C25|Vienna Gambit, with Max Lange Defense\",\"2ehraiaiqn4\":\"C25|Vienna Gambit, with Max Lange Defense: Cunningham Defense\",\"1ve9ula2xvx\":\"C25|Vienna Gambit, with Max Lange Defense: Hamppe-Allgaier Gambit\",\"fjwkd3gwyb\":\"C25|Vienna Gambit, with Max Lange Defense: Hamppe-Allgaier Gambit, Alapin Variation\",\"256r6k0oze8\":\"C25|Vienna Gambit, with Max Lange Defense: Hamppe-Allgaier Gambit, Thorold Variation\",\"1812xvogw7h\":\"C25|Vienna Gambit, with Max Lange Defense: Hamppe-Muzio Gambit\",\"256b0c28tu2\":\"C25|Vienna Gambit, with Max Lange Defense: Knight Variation\",\"1b2qcnbgl3r\":\"C25|Vienna Gambit, with Max Lange Defense: Pierce Gambit\",\"d1z9eboct4\":\"C25|Vienna Gambit, with Max Lange Defense: Quelle Gambit\",\"19tbwej03ep\":\"C25|Vienna Gambit, with Max Lange Defense: Steinitz Gambit\",\"1dfgjkuveu0\":\"C25|Vienna Gambit, with Max Lange Defense: Steinitz Gambit, Fraser-Minckwitz Defense\",\"1bs0g3rzq14\":\"C25|Vienna Gambit, with Max Lange Defense: Steinitz Gambit, Main Line\",\"rf0y53627b\":\"C25|Vienna Gambit, with Max Lange Defense: Steinitz Gambit, Paulsen Defense\",\"1am74kh210a\":\"C25|Vienna Gambit, with Max Lange Defense: Steinitz Gambit, Sörensen Defense\",\"20sghxlba44\":\"C25|Vienna Gambit, with Max Lange Defense: Steinitz Gambit, Zukertort Defense\",\"53ktr7s966\":\"C25|Vienna Game\",\"16el136ukl7\":\"C25|Vienna Game: Anderssen Defense\",\"1sl9p4t0n2y\":\"C25|Vienna Game: Fyfe Gambit\",\"tyjyz8ublp\":\"C25|Vienna Game: Giraffe Attack\",\"17p69ne3ruc\":\"C25|Vienna Game: Hamppe-Meitner Variation\",\"174ps7ikxvj\":\"C25|Vienna Game: Hamppe-Muzio Gambit\",\"cti4mfubfh\":\"C25|Vienna Game: Hamppe-Muzio, Dubois Variation\",\"128b9ldpd6k\":\"C25|Vienna Game: Max Lange Defense\",\"1xhlg26j7l6\":\"C25|Vienna Game: Omaha Gambit\",\"1jwc54i2jda\":\"C25|Vienna Game: Paulsen Variation\",\"y1vd3s0e8w\":\"C25|Vienna Game: Paulsen Variation\",\"l4pwwv1uag\":\"C25|Vienna Game: Paulsen Variation, Mariotti Gambit\",\"1gmqy37sqwy\":\"C25|Vienna Game: Philidor Countergambit\",\"63e45w5iu0\":\"C25|Vienna Game: Pierce Gambit, Rushmere Attack\",\"1opb75l6dd5\":\"C25|Vienna Game: Stanley Variation, Meitner-Mieses Gambit\",\"czoa7xb07y\":\"C25|Vienna Game: Zhuravlev Countergambit\",\"2fd00yceipz\":\"C26|Bishop's Opening: Horwitz Gambit\",\"1s21q9te1cq\":\"C26|Bishop's Opening: Vienna Hybrid, Spielmann Attack\",\"yc3elnxqah\":\"C26|Vienna Game: Falkbeer Variation\",\"1x47ehc3tnv\":\"C26|Vienna Game: Mengarini Variation\",\"qekdrrjh5c\":\"C26|Vienna Game: Mieses Variation\",\"14hbg3mn7wc\":\"C26|Vienna Game: Mieses Variation, Erben Gambit\",\"2dghp9fn0qn\":\"C26|Vienna Game: Paulsen Variation, Pollock Gambit\",\"heicx8dxnb\":\"C26|Vienna Game: Stanley Variation\",\"23ww9szwboo\":\"C26|Vienna Game: Stanley Variation, Eifel Gambit\",\"2ctkr247mkm\":\"C26|Vienna Game: Stanley Variation, Reversed Spanish\",\"2dx8sln08ir\":\"C27|Bishop's Opening: Boden-Kieseritzky Gambit\",\"39kgb67nst\":\"C27|Bishop's Opening: Boden-Kieseritzky Gambit, Lichtenhein Defense\",\"1o9nyhudkeo\":\"C27|Vienna Game: Adams' Gambit\",\"19z61p077ry\":\"C27|Vienna Game: Frankenstein-Dracula Variation\",\"1yee54zneta\":\"C27|Vienna Game: Stanley Variation, Alekhine Variation\",\"2eowrktk57i\":\"C27|Vienna Game: Stanley Variation, Frankenstein-Dracula Variation\",\"1qby5c7imp4\":\"C27|Vienna Game: Stanley Variation, Monster Declined\",\"7t4nqyh58j\":\"C28|Bishop's Opening: Vienna Hybrid, Hromádka Variation\",\"160m2ehr6st\":\"C28|Vienna Game: Stanley Variation, Bronstein Gambit\",\"t1rcjoj9fa\":\"C28|Vienna Game: Stanley Variation, Three Knights Variation\",\"65gud2emda\":\"C29|Vienna Game: Heyde Variation\",\"1f3gd5omdgx\":\"C29|Vienna Game: Vienna Gambit\",\"1na02tobdf8\":\"C29|Vienna Game: Vienna Gambit, Bardeleben Variation\",\"16pqrjxq71d\":\"C29|Vienna Game: Vienna Gambit, Breyer Variation\",\"1zes9q6eiz1\":\"C29|Vienna Game: Vienna Gambit, Kaufmann Variation\",\"2chjfhc6pa6\":\"C29|Vienna Game: Vienna Gambit, Main Line\",\"2epv597zet4\":\"C29|Vienna Game: Vienna Gambit, Modern Variation\",\"238blbqrd6u\":\"C29|Vienna Game: Vienna Gambit, Paulsen Attack\",\"1vci23zp3u7\":\"C29|Vienna Game: Vienna Gambit, Steinitz Variation\",\"2gjzlr1e2f2\":\"C29|Vienna Game: Vienna Gambit, Wurzburger Trap\",\"1ihu39v9slb\":\"C30|King's Gambit\",\"221mjz0qe23\":\"C30|King's Gambit Declined: Classical Variation\",\"13tei8f1g19\":\"C30|King's Gambit Declined: Classical Variation\",\"s8kcdzr68s\":\"C30|King's Gambit Declined: Classical Variation, Euwe Attack\",\"1gdm7f8u7g3\":\"C30|King's Gambit Declined: Classical Variation, Rotlewi Countergambit\",\"13atokn5nw6\":\"C30|King's Gambit Declined: Classical Variation, Rubinstein Countergambit\",\"nfgq28h1oc\":\"C30|King's Gambit Declined: Classical Variation, Walthoffen Attack\",\"24518et7xqp\":\"C30|King's Gambit Declined: Classical, Hanham Variation\",\"qsrj4n4re6\":\"C30|King's Gambit Declined: Classical, Réti Variation\",\"g4iumh3dzw\":\"C30|King's Gambit Declined: Classical, Soldatenkov Variation\",\"fvu0j4ya7v\":\"C30|King's Gambit Declined: Classical, Svenonius Variation\",\"jlznywyjbr\":\"C30|King's Gambit Declined: Hobbs-Zilbermints Gambit\",\"1oum0qqn7px\":\"C30|King's Gambit Declined: Keene Defense\",\"q0boa21ylu\":\"C30|King's Gambit Declined: Keene's Defense\",\"1j6zrr63n5a\":\"C30|King's Gambit Declined: Keene's Defense\",\"lcegpbqi6k\":\"C30|King's Gambit Declined: Mafia Defense\",\"ricm46d66o\":\"C30|King's Gambit Declined: Miles Defense\",\"2gevodisdx\":\"C30|King's Gambit Declined: Norwalde Variation\",\"1olwdfoem64\":\"C30|King's Gambit Declined: Norwalde Variation, Bücker Gambit\",\"27gtvrka3tm\":\"C30|King's Gambit Declined: Norwalde Variation, Schubert Variation\",\"1qvx6k7aeqf\":\"C30|King's Gambit Declined: Panteldakis Countergambit\",\"5cin1t9vw6\":\"C30|King's Gambit Declined: Panteldakis Countergambit, Greco Variation\",\"22kiowpsdg8\":\"C30|King's Gambit Declined: Panteldakis Countergambit, Pawn Sacrifice Line\",\"1oam44mqjke\":\"C30|King's Gambit Declined: Panteldakis Countergambit, Schiller's Defense\",\"25m2kar8ir5\":\"C30|King's Gambit Declined: Panteldakis Countergambit, Shirazi Line\",\"tb2yu9kzxo\":\"C30|King's Gambit Declined: Panteldakis Countergambit, Symmetrical Variation\",\"16y75n1e40y\":\"C30|King's Gambit Declined: Petrov's Defense\",\"vl7acxsnf5\":\"C30|King's Gambit Declined: Queen's Knight Defense\",\"1fpavrobgk1\":\"C30|King's Gambit Declined: Senechaud Countergambit\",\"29d148rcr6w\":\"C30|King's Gambit Declined: Soller-Zilbermints Gambit\",\"23hfmvh4mhr\":\"C30|King's Gambit Declined: Zilbermints Double Countergambit\",\"2a4a7huyipp\":\"C30|King's Gambit Declined: Zilbermints Double Gambit\",\"wnpa2monvv\":\"C31|King's Gambit Declined: Falkbeer Countergambit\",\"k3v25z9tey\":\"C31|King's Gambit Declined: Falkbeer Countergambit Accepted\",\"1uxrhhplcxi\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Anderssen Attack\",\"6t10gogzhb\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Blackburne Attack\",\"1o96lo2f148\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit\",\"4n16s5pnn6\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit, Morphy Defense\",\"2efzd21jw0b\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Hinrichsen Gambit\",\"j8bsblwngn\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Miles Gambit\",\"1vaf4hpz6dq\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Milner-Barry Variation\",\"2bf0xvywpqp\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Modern Transfer\",\"ta6i76imep\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Nimzowitsch-Marshall Countergambit\",\"2akmpq4x9vh\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Pickler Gambit\",\"d0gq26tvld\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Rubinstein Variation\",\"pbpx43okd9\":\"C31|King's Gambit Declined: Falkbeer Countergambit, Staunton Line\",\"27qhijf75rt\":\"C31|Van Geet Opening: Grünfeld Defense, Steiner Gambit\",\"26j5z52mxp1\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Alapin Variation\",\"nitgde2s23\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit\",\"csa5exammb\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit Accepted\",\"1kg3r7y2i7j\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit, Keres Variation\",\"1ms4ghzpr0j\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit, Main Line\",\"1fc1pkkdcuv\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Charousek Gambit, Old Line\",\"uhuol42kfs\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Charousek Variation\",\"q9tgkl6h0h\":\"C32|King's Gambit Declined: Falkbeer Countergambit, Tarrasch Variation\",\"2dnyjb41owj\":\"C33|King's Gambit Accepted\",\"1zfxeul11t\":\"C33|King's Gambit Accepted: Basman Gambit\",\"13azrvevj58\":\"C33|King's Gambit Accepted: Bishop's Gambit\",\"nbswzwv1we\":\"C33|King's Gambit Accepted: Bishop's Gambit, Anderssen Defense\",\"220v3fovh4p\":\"C33|King's Gambit Accepted: Bishop's Gambit, Anderssen Variation\",\"2bqx9zmatsl\":\"C33|King's Gambit Accepted: Bishop's Gambit, Bledow Countergambit\",\"11g0k8iko3r\":\"C33|King's Gambit Accepted: Bishop's Gambit, Bledow Variation\",\"bkz7z5pu31\":\"C33|King's Gambit Accepted: Bishop's Gambit, Boden Variation\",\"1fxuvlspiy1\":\"C33|King's Gambit Accepted: Bishop's Gambit, Bogoljubow Defense\",\"e3buy38wnu\":\"C33|King's Gambit Accepted: Bishop's Gambit, Bogoljubow Variation\",\"2glx81chym5\":\"C33|King's Gambit Accepted: Bishop's Gambit, Boren-Svenonius Variation\",\"1keqnfmva7q\":\"C33|King's Gambit Accepted: Bishop's Gambit, Bryan Countergambit\",\"2bhar6wx6qy\":\"C33|King's Gambit Accepted: Bishop's Gambit, Chigorin's Attack\",\"wcz0l9c4pa\":\"C33|King's Gambit Accepted: Bishop's Gambit, Classical Defense\",\"1q50smfr4u9\":\"C33|King's Gambit Accepted: Bishop's Gambit, Classical Defense, Cozio Attack\",\"1ka0v95latk\":\"C33|King's Gambit Accepted: Bishop's Gambit, Cozio Defense\",\"1633it2e3td\":\"C33|King's Gambit Accepted: Bishop's Gambit, Cozio Variation\",\"1itryq4vdw1\":\"C33|King's Gambit Accepted: Bishop's Gambit, First Jaenisch Variation\",\"n9qvh95av3\":\"C33|King's Gambit Accepted: Bishop's Gambit, Fraser Variation\",\"1eslvoxrpz1\":\"C33|King's Gambit Accepted: Bishop's Gambit, Gianutio Gambit\",\"1837475pf31\":\"C33|King's Gambit Accepted: Bishop's Gambit, Greco Variation\",\"1m39bwytg3h\":\"C33|King's Gambit Accepted: Bishop's Gambit, Grimm Attack\",\"1yww71ayai1\":\"C33|King's Gambit Accepted: Bishop's Gambit, Kieseritzky Gambit\",\"umc4uko6w7\":\"C33|King's Gambit Accepted: Bishop's Gambit, Lopez Defense\",\"mhfs38c50x\":\"C33|King's Gambit Accepted: Bishop's Gambit, Lopez Variation\",\"nn8o1mm3t3\":\"C33|King's Gambit Accepted: Bishop's Gambit, Maurian Defense\",\"79k2c4lchl\":\"C33|King's Gambit Accepted: Bishop's Gambit, McDonnell Attack\",\"z2t7wbdo7n\":\"C33|King's Gambit Accepted: Bishop's Gambit, McDonnell Attack\",\"15mxxen7md\":\"C33|King's Gambit Accepted: Bishop's Gambit, Paulsen Attack\",\"1qkiban4vpn\":\"C33|King's Gambit Accepted: Bishop's Gambit, Steinitz Defense\",\"7rhhiwk6te\":\"C33|King's Gambit Accepted: Breyer Gambit\",\"touhijyloh\":\"C33|King's Gambit Accepted: Carrera Gambit\",\"4g5i405p2w\":\"C33|King's Gambit Accepted: Dodo Variation\",\"r52rkbzbxf\":\"C33|King's Gambit Accepted: Eisenberg Variation\",\"16vwq5emmhk\":\"C33|King's Gambit Accepted: Gaga Gambit\",\"4cndaf16z6\":\"C33|King's Gambit Accepted: Lopez-Gianutio Countergambit, Hein Variation\",\"wr464jpblm\":\"C33|King's Gambit Accepted: Orsini Gambit\",\"roearrwv6l\":\"C33|King's Gambit Accepted: Paris Gambit\",\"1qn0zowm2ec\":\"C33|King's Gambit Accepted: Schurig Gambit, with Bb5\",\"2axh2k3x6nh\":\"C33|King's Gambit Accepted: Schurig Gambit, with Bd3\",\"1qkfr4hyd9y\":\"C33|King's Gambit Accepted: Stamma Gambit\",\"1m6hnp1e6rq\":\"C33|King's Gambit Accepted: Tartakower Gambit\",\"21imxzfp2sc\":\"C33|King's Gambit Accepted: Tartakower Gambit, Weiss Defense\",\"1iwlfzyvrzh\":\"C33|King's Gambit Accepted: Tumbleweed\",\"16x82a9l921\":\"C33|King's Gambit Accepted: Villemson Gambit\",\"b1um7g1ldm\":\"C34|King's Gambit Accepted: Becker Defense\",\"1rl37ghv5j7\":\"C34|King's Gambit Accepted: Bonsch-Osmolovsky Variation\",\"fnbi3qabby\":\"C34|King's Gambit Accepted: Fischer Defense\",\"kscqg60jow\":\"C34|King's Gambit Accepted: Fischer Defense, Schulder Gambit\",\"1e9vhukh070\":\"C34|King's Gambit Accepted: Fischer Defense, Spanish Variation\",\"tyvj32sn8t\":\"C34|King's Gambit Accepted: Gianutio Countergambit\",\"23ne75701e6\":\"C34|King's Gambit Accepted: Greco Gambit\",\"21wko8sljzm\":\"C34|King's Gambit Accepted: King's Knight's Gambit\",\"1lmx2x37ksw\":\"C34|King's Gambit Accepted: King's Knight's Gambit\",\"108yprcwgae\":\"C34|King's Gambit Accepted: MacLeod Defense\",\"nditr19xcl\":\"C34|King's Gambit Accepted: Schallopp Defense\",\"1qd3t5nkkjm\":\"C34|King's Gambit Accepted: Schallopp Defense, Tashkent Attack\",\"dmn2sny7pw\":\"C34|King's Gambit Accepted: Wagenbach Defense\",\"1wo0ka1jjqr\":\"C35|King's Gambit Accepted: Cunningham Defense\",\"wfp9af7f6y\":\"C35|King's Gambit Accepted: Cunningham Defense, Bertin Gambit\",\"1jtgerawzfo\":\"C35|King's Gambit Accepted: Cunningham Defense, Bertin Gambit\",\"1lnxwhhbg0p\":\"C35|King's Gambit Accepted: Cunningham Defense, McCormick Defense\",\"c5q1c01pwi\":\"C36|King's Gambit Accepted: Abbazia Defense\",\"uyynx46syw\":\"C36|King's Gambit Accepted: Abbazia Defense, Main Line\",\"tikhcw6omn\":\"C36|King's Gambit Accepted: Modern Defense\",\"14rbuz2nahj\":\"C36|King's Gambit Accepted: Modern Defense\",\"11qmbvx9t5s\":\"C37|King's Gambit Accepted: Australian Gambit\",\"y9k6y6l49j\":\"C37|King's Gambit Accepted: Blachly Gambit\",\"1k2rf30ve89\":\"C37|King's Gambit Accepted: Double Muzio Gambit\",\"djp388pq8a\":\"C37|King's Gambit Accepted: Double Muzio Gambit, Baldwin Gambit\",\"2gfaabj3a5b\":\"C37|King's Gambit Accepted: Double Muzio Gambit, Bello Gambit\",\"p32eyu13ke\":\"C37|King's Gambit Accepted: Double Muzio Gambit, Paulsen Defense\",\"2adycgwnfxr\":\"C37|King's Gambit Accepted: Double Muzio Gambit, Young Gambit\",\"28k078jmb9a\":\"C37|King's Gambit Accepted: Ghulam-Kassim Gambit\",\"270bv3rh7zx\":\"C37|King's Gambit Accepted: Ghulam-Kassim Gambit\",\"26z169c6p2t\":\"C37|King's Gambit Accepted: King's Knight's Gambit\",\"xe2kpb43a\":\"C37|King's Gambit Accepted: Kotov Gambit\",\"1gjpytfx7to\":\"C37|King's Gambit Accepted: Lolli Gambit\",\"i9ilfauyxh\":\"C37|King's Gambit Accepted: Lolli Gambit, Young Variation\",\"2ey7hm2hbo1\":\"C37|King's Gambit Accepted: McDonnell Gambit\",\"22zryaskbgi\":\"C37|King's Gambit Accepted: Middleton Countergambit\",\"1t5aecjzkw8\":\"C37|King's Gambit Accepted: Muzio Gambit Accepted, From's Defense\",\"1wff8i2do0g\":\"C37|King's Gambit Accepted: Muzio Gambit, Brentano Defense\",\"d9cx6g071s\":\"C37|King's Gambit Accepted: Muzio Gambit, Holloway Defense\",\"1hc2azs1izt\":\"C37|King's Gambit Accepted: Muzio Gambit, Kling and Horwitz Counterattack\",\"19t1v54wbv7\":\"C37|King's Gambit Accepted: Muzio Gambit, Sarratt Defense\",\"ccbwjyderr\":\"C37|King's Gambit Accepted: Muzio Gambit, Wild Muzio Gambit\",\"1bsu4oxy5w9\":\"C37|King's Gambit Accepted: Quaade Gambit\",\"1bl2134na26\":\"C37|King's Gambit Accepted: Rosentreter Gambit\",\"1dqmktwt5yh\":\"C37|King's Gambit Accepted: Rosentreter Gambit, Bird Gambit\",\"qrzvd0759d\":\"C37|King's Gambit Accepted: Rosentreter Gambit, Sörensen Gambit\",\"mv8okrcx4h\":\"C37|King's Gambit Accepted: Rosentreter Gambit, Testa Variation\",\"cjr2wadx8i\":\"C37|King's Gambit Accepted: Salvio Gambit\",\"23ryvd9kmqz\":\"C37|King's Gambit Accepted: Salvio Gambit, Anderssen Counterattack\",\"c3ceuw1h9r\":\"C37|King's Gambit Accepted: Salvio Gambit, Cochrane Gambit\",\"27gly2z9bm7\":\"C37|King's Gambit Accepted: Salvio Gambit, Santa Maria Defense\",\"mzzd6hrp55\":\"C37|King's Gambit Accepted: Salvio Gambit, Silberschmidt Defense\",\"2akf5mr1sga\":\"C37|King's Gambit Accepted: Salvio Gambit, Viennese Variation\",\"wi6nqqqnes\":\"C37|King's Gambit Accepted: Silberschmidt Gambit\",\"1ftfme1bbkc\":\"C37|King's Gambit Accepted: Sörensen Gambit\",\"1h3sk383e9y\":\"C38|King's Gambit Accepted: Greco Gambit\",\"1x3p6hpipdc\":\"C38|King's Gambit Accepted: Hanstein Gambit\",\"1r9dytd5xw6\":\"C38|King's Gambit Accepted: Mayet Gambit\",\"24aex33h54t\":\"C38|King's Gambit Accepted: Philidor Gambit\",\"1aqoy0i207m\":\"C38|King's Gambit Accepted: Philidor Gambit, Schultz Variation\",\"1lz408uefhn\":\"C38|King's Gambit Accepted: Traditional Variation\",\"e8y82t5dxz\":\"C39|King's Gambit Accepted: Allgaier Gambit\",\"7ukpwet856\":\"C39|King's Gambit Accepted: Allgaier Gambit, Thorold Attack\",\"174b4qmpsqq\":\"C39|King's Gambit Accepted: Allgaier Gambit, Urusov Attack\",\"1pxg3tbz61i\":\"C39|King's Gambit Accepted: Allgaier, Blackburne Gambit\",\"21167wa7qx2\":\"C39|King's Gambit Accepted: Allgaier, Cook Variation\",\"gr9xrt1zm9\":\"C39|King's Gambit Accepted: Allgaier, Horny Defense\",\"1244sg3xns3\":\"C39|King's Gambit Accepted: Allgaier, Schlechter Defense\",\"1se69xjizq4\":\"C39|King's Gambit Accepted: Allgaier, Urusov Attack\",\"hqw5pu4xtr\":\"C39|King's Gambit Accepted: Kieseritzky Gambit\",\"fwx4vfnltw\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Anderssen Defense\",\"ns0rzi0g47\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Anderssen-Cordel Gambit\",\"ga3ez18n0w\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Berlin Defense\",\"1s10gnkdrem\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Berlin Defense, Rubinstein Variation\",\"26q4zo8f90s\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Berlin Defense, de Riviere Variation\",\"2bvh6sooz65\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Brentano Defense\",\"6n0mude31\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Brentano Defense\",\"23x77g0q1f4\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Brentano Defense, Caro Variation\",\"1rx19pxzaus\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Cotter Gambit\",\"1paxlbpembp\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Kolisch Defense\",\"250vhg6mmfz\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Long Whip\",\"kfqdr6xp0s\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Neumann Defense\",\"2bkl09cu0sj\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Paulsen Defense\",\"1rzutr5e9l9\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Paulsen Defense Deferred\",\"8wmh5ol6f6\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Rice Gambit\",\"wtcu8pwa27\":\"C39|King's Gambit Accepted: Kieseritzky Gambit, Rosenthal Defense\",\"22d27e5fjk7\":\"C39|King's Gambit Accepted: Kieseritzky, Long Whip Defense, Jaenisch Variation\",\"1sc18c9n6kq\":\"C39|King's Gambit Accepted: Kieseritzky, Polerio Defense\",\"1laaef718zy\":\"C39|King's Gambit Accepted: Kieseritzky, Rice Gambit\",\"1dr8pwkjyyu\":\"C39|King's Gambit Accepted: Kieseritzky, Salvio Defense, Cozio Variation\",\"21dxhh3xkh5\":\"C39|King's Gambit Accepted: King's Knight's Gambit\",\"26bzzonvg8l\":\"C40|Elephant Gambit\",\"jrxtx45gfg\":\"C40|Elephant Gambit: Maróczy Gambit\",\"itsu8v6vly\":\"C40|Elephant Gambit: Paulsen Countergambit\",\"1om7tsfvx4q\":\"C40|Elephant Gambit: Wasp Variation\",\"x6rwxyla0a\":\"C40|Gunderam Defense\",\"w0hmh5pzq4\":\"C40|King's Knight Opening\",\"4dedxbvvzm\":\"C40|King's Pawn Game: Busch-Gass Gambit\",\"gf06limshx\":\"C40|King's Pawn Game: Busch-Gass Gambit, Chiodini Gambit\",\"1gmf1k2wslf\":\"C40|King's Pawn Game: Damiano Defense\",\"21mxgbxqus9\":\"C40|King's Pawn Game: Damiano Defense, Damiano Gambit\",\"1sqk9y2cuwv\":\"C40|King's Pawn Game: Damiano Defense, Damiano Gambit, Chigorin Gambit\",\"1mxn734el2w\":\"C40|King's Pawn Game: Gunderam Defense, Gunderam Gambit\",\"1c8pdj4v0td\":\"C40|King's Pawn Game: Gunderam Gambit\",\"m9xg1sxte3\":\"C40|King's Pawn Game: La Bourdonnais Gambit\",\"26nyzp68i1i\":\"C40|King's Pawn Game: McConnell Defense\",\"23vdwd7u2f9\":\"C40|Latvian Gambit\",\"13gel1bszj0\":\"C40|Latvian Gambit Accepted\",\"1anekk4pp96\":\"C40|Latvian Gambit Accepted: Bilguer Variation\",\"1kqmkf6lqxf\":\"C40|Latvian Gambit Accepted: Bronstein Attack\",\"13do0yg55m\":\"C40|Latvian Gambit Accepted: Bronstein Gambit\",\"trmyeeul5c\":\"C40|Latvian Gambit Accepted: Foltys Variation\",\"uvts2ageuq\":\"C40|Latvian Gambit Accepted: Foltys-Leonhardt Variation\",\"1e3mfiaaa45\":\"C40|Latvian Gambit Accepted: Leonhardt Variation\",\"18plj1aba8q\":\"C40|Latvian Gambit Accepted: Main Line\",\"9h3v3umkp\":\"C40|Latvian Gambit Accepted: Nimzowitsch Attack\",\"1mluovbks9a\":\"C40|Latvian Gambit: Behting Variation\",\"1hy5snpo6ro\":\"C40|Latvian Gambit: Corkscrew Countergambit\",\"14ofgbi23gt\":\"C40|Latvian Gambit: Corkscrew Gambit\",\"1ip0i4mgdtr\":\"C40|Latvian Gambit: Diepstraten Countergambit\",\"2a2edtzl0mt\":\"C40|Latvian Gambit: Fraser Defense\",\"r1iap4t89z\":\"C40|Latvian Gambit: Greco Variation\",\"1ywt8b65tb9\":\"C40|Latvian Gambit: Lobster Gambit\",\"q89rn0j9mb\":\"C40|Latvian Gambit: Mason Countergambit\",\"1owcj33mxev\":\"C40|Latvian Gambit: Mayet Attack\",\"2f8yby81yme\":\"C40|Latvian Gambit: Mayet Attack, Morgado Defense\",\"npbmlcb1c1\":\"C40|Latvian Gambit: Mayet Attack, Poisoned Pawn Variation\",\"gx6ls99huz\":\"C40|Latvian Gambit: Mayet Attack, Polerio-Svedenborg Variation\",\"16jvsylr7tc\":\"C40|Latvian Gambit: Mayet Attack, Strautins Gambit\",\"teul0pwoyi\":\"C40|Latvian Gambit: Mlotkowski Variation\",\"2a40kfowhnb\":\"C40|Latvian Gambit: Senechaud Gambit\",\"1zti8kn2u7c\":\"C41|Philidor Defense\",\"1yd1l6eq4yd\":\"C41|Philidor Defense\",\"21qf43ni03y\":\"C41|Philidor Defense\",\"t862e5kgfb\":\"C41|Philidor Defense\",\"2gjlpxflp2e\":\"C41|Philidor Defense: Albin-Blackburne Gambit\",\"tz5ai8m2w8\":\"C41|Philidor Defense: Berger Variation\",\"12r9t6phiqc\":\"C41|Philidor Defense: Bird Gambit\",\"vk05ejdo0o\":\"C41|Philidor Defense: Boden Variation\",\"11nkbgdgbnl\":\"C41|Philidor Defense: Exchange Variation\",\"1rofl0comiq\":\"C41|Philidor Defense: Exchange Variation\",\"2cyaqqkl5y1\":\"C41|Philidor Defense: Exchange Variation\",\"11t98j19e1l\":\"C41|Philidor Defense: Hanham Variation\",\"2d8kq2pks3w\":\"C41|Philidor Defense: Hanham Variation, Delmar Variation\",\"1h2i7vdec03\":\"C41|Philidor Defense: Hanham Variation, Krause Variation\",\"16jx0p40sy1\":\"C41|Philidor Defense: Hanham Variation, Schlechter Variation\",\"lb6gql78z1\":\"C41|Philidor Defense: Hanham Variation, Sharp Variation\",\"16myfthnjzg\":\"C41|Philidor Defense: Hanham Variation, Steiner Variation\",\"1mywonq6quj\":\"C41|Philidor Defense: Hanham, Kmoch Variation\",\"1pu8uhqg1b9\":\"C41|Philidor Defense: Larsen Variation\",\"szh5js20qf\":\"C41|Philidor Defense: Lion Variation\",\"1vqdakkx44o\":\"C41|Philidor Defense: Lion Variation, Bishop Sacrifice\",\"1ovg711rdvo\":\"C41|Philidor Defense: Lion Variation, Delayed Bishop Sacrifice\",\"1jqf7mgo42a\":\"C41|Philidor Defense: Lion Variation, Forcing Line\",\"dxh36ag7lb\":\"C41|Philidor Defense: Lion Variation, Lion's Claw, with Bc4 and h6\",\"py982y4dk5\":\"C41|Philidor Defense: Lion Variation, Lion's Claw, with Be2 and c6\",\"1xhdjedr9eg\":\"C41|Philidor Defense: Lion Variation, Shirov Gambit\",\"223c0h66kfa\":\"C41|Philidor Defense: Lion Variation, Sozin Variation\",\"1fxxy4g13rl\":\"C41|Philidor Defense: Lopez Countergambit\",\"8o3oeb8m7d\":\"C41|Philidor Defense: Lopez Countergambit, Jaenisch Variation\",\"1s4bg4i5vx7\":\"C41|Philidor Defense: Morphy Gambit\",\"lmp3bqclkp\":\"C41|Philidor Defense: Nimzowitsch Variation\",\"2blsv73q0z1\":\"C41|Philidor Defense: Nimzowitsch Variation\",\"u7298ede68\":\"C41|Philidor Defense: Nimzowitsch Variation, Klein Variation\",\"xquiu44asl\":\"C41|Philidor Defense: Nimzowitsch Variation, Rellstab Variation\",\"1rkr8181xba\":\"C41|Philidor Defense: Nimzowitsch Variation, Sokolsky Variation\",\"jbfvt95p4u\":\"C41|Philidor Defense: Nimzowitsch, Larobok Variation\",\"obe2fhohqw\":\"C41|Philidor Defense: Nimzowitsch, Locock Variation\",\"1wmn9xh0122\":\"C41|Philidor Defense: Paulsen Attack\",\"1nuyobcrmpa\":\"C41|Philidor Defense: Philidor Countergambit\",\"7fl63u4agq\":\"C41|Philidor Defense: Philidor Countergambit, Berger Variation\",\"1qn8t1tuhld\":\"C41|Philidor Defense: Philidor Countergambit, Zukertort Variation\",\"2253yl94tnm\":\"C41|Philidor Defense: Philidor Countergambit, del Rio Attack\",\"109cvtdh2y4\":\"C41|Philidor Defense: Philidor Gambit\",\"fe0nswo3e4\":\"C41|Philidor Defense: Steinitz Variation\",\"9zmz2a20z3\":\"C42|Petrov's Defense\",\"25h0qcjywcq\":\"C42|Petrov's Defense\",\"136x9h0m3rp\":\"C42|Petrov's Defense\",\"kdown55s85\":\"C42|Petrov's Defense\",\"25yyz12rzgo\":\"C42|Petrov's Defense\",\"1qlkcgcr1t5\":\"C42|Petrov's Defense: Classical Attack\",\"cv9t9uglhy\":\"C42|Petrov's Defense: Classical Attack, Berger Variation\",\"14rpu9k5si\":\"C42|Petrov's Defense: Classical Attack, Chigorin Variation\",\"jllhieepre\":\"C42|Petrov's Defense: Classical Attack, Chigorin Variation, Browne Attack\",\"ymjc839bme\":\"C42|Petrov's Defense: Classical Attack, Chigorin Variation, Main Line\",\"n6lv7qo9aq\":\"C42|Petrov's Defense: Classical Attack, Closed Variation\",\"2fq1yszluev\":\"C42|Petrov's Defense: Classical Attack, Jaenisch Variation\",\"2g67walnzm4\":\"C42|Petrov's Defense: Classical Attack, Krause Variation\",\"1md1shk29u7\":\"C42|Petrov's Defense: Classical Attack, Marshall Trap\",\"1942fuleuj5\":\"C42|Petrov's Defense: Classical Attack, Marshall Variation\",\"1q815rzpzbu\":\"C42|Petrov's Defense: Classical Attack, Marshall Variation, Chinese Gambit\",\"1d2dlcwzgkf\":\"C42|Petrov's Defense: Classical Attack, Maróczy Variation\",\"12egavtpm22\":\"C42|Petrov's Defense: Classical Attack, Mason Variation\",\"183hdk6z4zp\":\"C42|Petrov's Defense: Classical Attack, Mason-Showalter Variation\",\"h3vbcbchtb\":\"C42|Petrov's Defense: Classical Attack, Staunton Variation\",\"qwqd0lnx3s\":\"C42|Petrov's Defense: Classical Attack, Tarrasch Variation\",\"6wxhm6q5ze\":\"C42|Petrov's Defense: Cochrane Gambit\",\"7lc9w7ts5j\":\"C42|Petrov's Defense: Cochrane Gambit, Bishop Check Line\",\"1hjf96yn0q2\":\"C42|Petrov's Defense: Cochrane Gambit, Center Variation\",\"nl5oc831kc\":\"C42|Petrov's Defense: Cozio Attack\",\"87up6h1y7c\":\"C42|Petrov's Defense: Damiano Variation\",\"wohr4rwagf\":\"C42|Petrov's Defense: Damiano Variation, Kholmov Gambit\",\"wczbm1ug2c\":\"C42|Petrov's Defense: French Attack\",\"21k1b3avaaz\":\"C42|Petrov's Defense: Italian Variation\",\"u0v6sosf52\":\"C42|Petrov's Defense: Karklins-Martinovsky Variation\",\"1qicresxe34\":\"C42|Petrov's Defense: Kaufmann Attack\",\"b65k26swxj\":\"C42|Petrov's Defense: Millennium Attack\",\"1pl5lp97lcf\":\"C42|Petrov's Defense: Moody Gambit\",\"1fzjaoexw4g\":\"C42|Petrov's Defense: Nimzowitsch Attack\",\"1xureejjdbw\":\"C42|Petrov's Defense: Paulsen Attack\",\"g98utsreyx\":\"C42|Petrov's Defense: Stafford Gambit\",\"1ul9ttog7y6\":\"C42|Petrov's Defense: Stafford Gambit Accepted\",\"1q418rlq06s\":\"C42|Petrov's Defense: Stafford Gambit Accepted\",\"1uc2w1cwjv3\":\"C42|Petrov's Defense: Stafford Gambit Accepted\",\"6czos8rs8b\":\"C42|Petrov's Defense: Three Knights Game\",\"1zmpfgc1otf\":\"C43|Bishop's Opening: Urusov Gambit\",\"67tgsuquc6\":\"C43|Bishop's Opening: Urusov Gambit, Keidansky Gambit\",\"xwl93ndhb1\":\"C43|Petrov's Defense: Modern Attack\",\"d6cik9hg3a\":\"C43|Petrov's Defense: Modern Attack\",\"1jxl4vq9geb\":\"C43|Petrov's Defense: Modern Attack, Bardeleben Variation\",\"1jn4db6o55m\":\"C43|Petrov's Defense: Modern Attack, Center Attack\",\"27izbhclj9h\":\"C43|Petrov's Defense: Modern Attack, Center Variation\",\"24pg8baf08s\":\"C43|Petrov's Defense: Modern Attack, Murrey Variation\",\"1s48k2e7m3s\":\"C43|Petrov's Defense: Modern Attack, Steinitz Variation\",\"vy5yfy6e0v\":\"C43|Petrov's Defense: Modern Attack, Symmetrical Variation\",\"q1bvr03bvx\":\"C43|Petrov's Defense: Modern Attack, Tal Gambit\",\"25z1d5dmima\":\"C43|Petrov's Defense: Modern Attack, Trifunovic Variation\",\"1b9p1ajurz3\":\"C44|Dresden Opening: The Goblin\",\"9kms8bsegk\":\"C44|Irish Gambit\",\"hha0kos6w\":\"C44|King's Knight Opening: Konstantinopolsky\",\"1ly5n5i7w76\":\"C44|King's Knight Opening: Normal Variation\",\"1xwl44e8ctj\":\"C44|King's Pawn Game: Dresden Opening\",\"1be74slkxak\":\"C44|King's Pawn Game: Pachman Wing Gambit\",\"1pcnprjklcu\":\"C44|King's Pawn Game: Schulze-Müller Gambit\",\"7i4rd8a2c0\":\"C44|King's Pawn Game: Tayler Opening\",\"2fgokkdxpih\":\"C44|King's Pawn Game: Tayler Opening\",\"wckhvtgh5v\":\"C44|King's Pawn Game: Tayler Opening, Basman Gambit\",\"gk2i1i4s5k\":\"C44|King's Pawn Game: Tayler Opening, Inverted Hanham\",\"254l5wf1q1n\":\"C44|Latvian Gambit: Clam Gambit\",\"12w3yep5fc9\":\"C44|Ponziani Opening\",\"drghqz91f4\":\"C44|Ponziani Opening: Caro Gambit\",\"tte1kjv4pt\":\"C44|Ponziani Opening: Jaenisch Counterattack\",\"2c0jkwm9ifi\":\"C44|Ponziani Opening: Jaenisch Counterattack\",\"1nv11gdfouo\":\"C44|Ponziani Opening: Jaenisch Counterattack\",\"16ekynhdani\":\"C44|Ponziani Opening: Jaenisch Counterattack\",\"1beetes8vy0\":\"C44|Ponziani Opening: Leonhardt Variation\",\"bklpuk9f7t\":\"C44|Ponziani Opening: Neumann Gambit\",\"2bcrwvzzfr6\":\"C44|Ponziani Opening: Ponziani Countergambit\",\"27obw1moa03\":\"C44|Ponziani Opening: Ponziani Countergambit, Schmidt Attack\",\"20dvuyql9ed\":\"C44|Ponziani Opening: Romanishin Variation\",\"yrac299b45\":\"C44|Ponziani Opening: Réti Variation\",\"sesjrsnfny\":\"C44|Ponziani Opening: Spanish Variation\",\"l0ah3kqzti\":\"C44|Ponziani Opening: Spanish Variation, Harrwitz Attack, Nikitin Gambit\",\"1bfuvxky3o3\":\"C44|Ponziani Opening: Steinitz Variation\",\"nwd9k9jm0d\":\"C44|Ponziani Opening: Vukovic Gambit\",\"1cuhfh6d40h\":\"C44|Scotch Game\",\"1ekndpnehib\":\"C44|Scotch Game\",\"xupfswts0v\":\"C44|Scotch Game: Benima Defense\",\"1n1v93yatgl\":\"C44|Scotch Game: Cochrane Variation\",\"1icvb2p28kq\":\"C44|Scotch Game: Cochrane-Shumov Defense\",\"1kt70ykugsg\":\"C44|Scotch Game: Göring Gambit\",\"hun6qqygye\":\"C44|Scotch Game: Göring Gambit, Bardeleben Variation\",\"zvvvjk9qy3\":\"C44|Scotch Game: Göring Gambit, Double Pawn Sacrifice\",\"yuwu4h1mhr\":\"C44|Scotch Game: Göring Gambit, Main Line\",\"pdjmlh4zwi\":\"C44|Scotch Game: Hanneken Variation\",\"4qwclnmnf9\":\"C44|Scotch Game: Haxo Gambit\",\"22b79f72aak\":\"C44|Scotch Game: Lolli Variation\",\"p3m4e1ixft\":\"C44|Scotch Game: Lolli Variation\",\"qwetjpnrlv\":\"C44|Scotch Game: Napoleon Gambit\",\"lrk5qdvbo5\":\"C44|Scotch Game: Relfsson Gambit\",\"1i39q28fdsb\":\"C44|Scotch Game: Scotch Gambit\",\"cxris5cdsu\":\"C44|Scotch Game: Scotch Gambit, Advance Variation\",\"29is5o4nsjv\":\"C44|Scotch Game: Scotch Gambit, Cochrane-Anderssen Variation\",\"14u0mqcetq4\":\"C44|Scotch Game: Scotch Gambit, Dubois Réti Defense\",\"22bgdwhki15\":\"C44|Scotch Game: Scotch Gambit, Göring Gambit Declined\",\"287003v6xjj\":\"C44|Scotch Game: Scotch Gambit, Kingside Variation\",\"2b6rk50j3nl\":\"C44|Scotch Game: Scotch Gambit, London Defense\",\"1hk6jthu8fd\":\"C44|Scotch Game: Scotch Gambit, Sarratt Variation\",\"2ui086ffbu\":\"C44|Scotch Game: Sea-Cadet Mate\",\"2775qsk3wai\":\"C44|Scotch Game: Vitzthum Attack\",\"1xfowz70l0v\":\"C45|Scotch Game\",\"qe40uravk0\":\"C45|Scotch Game\",\"1gmu8vsex9\":\"C45|Scotch Game: Alekhine Gambit\",\"11sk9ey76bu\":\"C45|Scotch Game: Blumenfeld Attack\",\"1wryzrdqsv0\":\"C45|Scotch Game: Braune Variation\",\"1kfvvg5edu7\":\"C45|Scotch Game: Classical Variation\",\"22e0o692okj\":\"C45|Scotch Game: Classical Variation, Blackburne Attack\",\"iumydfebj\":\"C45|Scotch Game: Classical Variation, Intermezzo Variation\",\"1j9gyg1mex8\":\"C45|Scotch Game: Classical Variation, Millennium Variation\",\"2gluw0rhlgk\":\"C45|Scotch Game: Fraser Variation\",\"1g0k1nc2bsy\":\"C45|Scotch Game: Ghulam-Kassim Variation\",\"25a3pt4twaj\":\"C45|Scotch Game: Gottschall Variation\",\"1z8fqxwbu03\":\"C45|Scotch Game: Horwitz Attack\",\"vdtu3j4t6p\":\"C45|Scotch Game: Horwitz Attack, Blackburne Variation\",\"13t851e0gu\":\"C45|Scotch Game: Malaniuk Variation\",\"13o8avrcmk5\":\"C45|Scotch Game: Meitner Variation\",\"1qjepatucq1\":\"C45|Scotch Game: Mieses Variation\",\"12q6x4aaact\":\"C45|Scotch Game: Modern Defense\",\"3y7zaqp92e\":\"C45|Scotch Game: Paulsen Attack\",\"t5zmpw1uqr\":\"C45|Scotch Game: Paulsen Variation\",\"1ffrg2ql5mb\":\"C45|Scotch Game: Paulsen, Gunsberg Defense\",\"1yc10a16y9b\":\"C45|Scotch Game: Potter Variation\",\"1hopp89vw4u\":\"C45|Scotch Game: Romanishin Variation\",\"193rx99wwwx\":\"C45|Scotch Game: Rosenthal Variation\",\"1mgd0ndhnia\":\"C45|Scotch Game: Schmidt Variation\",\"1hqyu6srh5h\":\"C45|Scotch Game: Steinitz Variation\",\"1mfxfe0w6xj\":\"C45|Scotch Game: Steinitz Variation\",\"13bk1w77cx2\":\"C45|Scotch Game: Tartakower Variation\",\"1fmv8cvr25i\":\"C46|Three Knights Opening\",\"1yzo50ghkxp\":\"C46|Three Knights Opening\",\"mtyby4l1g1\":\"C46|Three Knights Opening: Schlechter Variation\",\"2958efvnal\":\"C46|Three Knights Opening: Steinitz Defense\",\"161pzpnr3xz\":\"C46|Three Knights Opening: Steinitz-Rosenthal Variation\",\"1355b2ptx2c\":\"C46|Three Knights Opening: Winawer Defense\",\"83ymuwyuj7\":\"C47|Four Knights Game\",\"202sxjzsd5h\":\"C47|Four Knights Game: Glek System\",\"xxr1h877eu\":\"C47|Four Knights Game: Glek System\",\"13zefno9nmo\":\"C47|Four Knights Game: Gunsberg Variation\",\"1doacnlimqz\":\"C47|Four Knights Game: Gunsberg Variation, Provincial Opening\",\"1q8gbg8hem4\":\"C47|Four Knights Game: Halloween Gambit\",\"9cim3a9z5f\":\"C47|Four Knights Game: Halloween Gambit, Oldtimer Variation\",\"1q2zjuzt6ha\":\"C47|Four Knights Game: Halloween Gambit, Plasma Variation\",\"2569n75g4tv\":\"C47|Four Knights Game: Italian Variation\",\"18m9tbmey0m\":\"C47|Four Knights Game: Italian Variation, Noa Gambit\",\"22ns3vcpso0\":\"C47|Four Knights Game: Naroditsky Variation\",\"22s9geobjpk\":\"C47|Four Knights Game: Scotch Variation\",\"x83v9b0w3b\":\"C47|Four Knights Game: Scotch Variation Accepted\",\"10vfwfkcqre\":\"C47|Four Knights Game: Scotch Variation Accepted, Main Line\",\"1byywfivya7\":\"C47|Four Knights Game: Scotch Variation, Belgrade Gambit\",\"7t52nk86pj\":\"C47|Four Knights Game: Scotch Variation, Belgrade Gambit, Modern Defense\",\"12zg8ebn16b\":\"C47|Four Knights Game: Scotch Variation, Krause Gambit\",\"17vulbn0ixf\":\"C47|Four Knights Game: Scotch Variation, Krause Gambit, Leonhardt Defense\",\"ruhrqxmode\":\"C47|Four Knights Game: Scotch Variation, Oxford Gambit\",\"1zh29t8cf61\":\"C47|Four Knights Game: Scotch Variation, Schmid Defense\",\"1z6xtyw3xar\":\"C48|Four Knights Game: Spanish Variation\",\"14ijjrv8fmq\":\"C48|Four Knights Game: Spanish Variation, Bardeleben Variation\",\"si658m133w\":\"C48|Four Knights Game: Spanish Variation, Classical Variation\",\"1xf9xn2wtcn\":\"C48|Four Knights Game: Spanish Variation, Ranken Variation\",\"11gxfoqrjb9\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation\",\"22tihfzyr0y\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation\",\"1niwjopk1y3\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation\",\"1aw1v32qrlm\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation Accepted\",\"m4i4t6bbem\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation, Henneberger Variation\",\"kcynkcahdp\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation, Marshall Gambit\",\"116sxroov30\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation, Marshall Variation\",\"11pt3dn7jt\":\"C48|Four Knights Game: Spanish Variation, Rubinstein Variation, Maróczy Variation\",\"1osz6m3u8ym\":\"C48|Four Knights Game: Spanish Variation, Spielmann Variation\",\"28c2t9hoakv\":\"C49|Four Knights Game: Spanish Variation\",\"19j8xdmruof\":\"C49|Four Knights Game: Spanish Variation, Alatortsev Variation\",\"b1uoytxohs\":\"C49|Four Knights Game: Spanish Variation, Double Spanish\",\"qgzc66i7xe\":\"C49|Four Knights Game: Spanish Variation, Double Spanish\",\"1dyzj5a1zd6\":\"C49|Four Knights Game: Spanish Variation, Gunsberg Counterattack\",\"l9066xc13f\":\"C49|Four Knights Game: Spanish Variation, Janowski Variation\",\"2eb262miywl\":\"C49|Four Knights Game: Spanish Variation, Nimzowitsch Variation\",\"1rcgjr8t0kd\":\"C49|Four Knights Game: Spanish Variation, Svenonius Variation\",\"2b3qgl0x34g\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation\",\"29ho4eavrhz\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation\",\"65n0i3j93n\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation\",\"164j9a8zfep\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation\",\"2gknmfxqyzm\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation, Blake Variation\",\"2344ck613ub\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation, Metger Unpin\",\"1e85v3ddd1z\":\"C49|Four Knights Game: Spanish Variation, Symmetrical Variation, Tarrasch Variation\",\"16z9z3r4ce0\":\"C50|Four Knights Game: Italian Variation\",\"22uqwrdalfl\":\"C50|Italian Game\",\"13oybwup5t7\":\"C50|Italian Game: Anti-Fried Liver Defense\",\"1t6mf79d7p\":\"C50|Italian Game: Blackburne-Kostić Gambit\",\"1wt59lrbyaq\":\"C50|Italian Game: Classical Variation, Albin Gambit\",\"1iq2p627u0o\":\"C50|Italian Game: Deutz Gambit\",\"102kw4oqzli\":\"C50|Italian Game: Giuoco Pianissimo\",\"1iqfh6wwjlk\":\"C50|Italian Game: Giuoco Pianissimo\",\"blicbtwtw3\":\"C50|Italian Game: Giuoco Pianissimo\",\"216z7zji7cc\":\"C50|Italian Game: Giuoco Pianissimo\",\"xyn12s3umr\":\"C50|Italian Game: Giuoco Pianissimo, Canal Variation\",\"29f8s1i9pbr\":\"C50|Italian Game: Giuoco Pianissimo, Dubois Variation\",\"1deiljbeu8k\":\"C50|Italian Game: Giuoco Pianissimo, Italian Four Knights Variation\",\"o055huxa3o\":\"C50|Italian Game: Giuoco Pianissimo, Lucchini Gambit\",\"20bvnlk1kmh\":\"C50|Italian Game: Giuoco Pianissimo, Normal\",\"1zm0egwg8xu\":\"C50|Italian Game: Giuoco Piano\",\"25qclmz93a1\":\"C50|Italian Game: Hungarian Defense\",\"jdd4ape49x\":\"C50|Italian Game: Hungarian Defense, Tartakower Variation\",\"117ox3088s0\":\"C50|Italian Game: Jerome Gambit\",\"1q1qj9ug8ep\":\"C50|Italian Game: Paris Defense\",\"byivb3eur\":\"C50|Italian Game: Rosentreter Gambit\",\"sgbeho9f5w\":\"C50|Italian Game: Rousseau Gambit\",\"1nfmfg9rj9p\":\"C51|Italian Game: Evans Gambit\",\"1qi7dzls24q\":\"C51|Italian Game: Evans Gambit\",\"19msmjkzmxg\":\"C51|Italian Game: Evans Gambit Accepted\",\"eh86ze58ma\":\"C51|Italian Game: Evans Gambit Declined\",\"28oi4k2wc1k\":\"C51|Italian Game: Evans Gambit Declined\",\"1um210sb5ad\":\"C51|Italian Game: Evans Gambit Declined, Cordel Variation\",\"brslac5gfx\":\"C51|Italian Game: Evans Gambit Declined, Hicken Variation\",\"1rw8mcggjyp\":\"C51|Italian Game: Evans Gambit Declined, Hirschbach Variation\",\"12g4mb8ahb9\":\"C51|Italian Game: Evans Gambit Declined, Lange Variation\",\"16nj3z7m4ny\":\"C51|Italian Game: Evans Gambit Declined, Pavlov Variation\",\"1qees0eswon\":\"C51|Italian Game: Evans Gambit Declined, Showalter Variation\",\"1yo88fp1eds\":\"C51|Italian Game: Evans Gambit Declined, Vasquez Variation\",\"21yzg1cbb0v\":\"C51|Italian Game: Evans Gambit, Anderssen Variation\",\"qw6ff2ogbo\":\"C51|Italian Game: Evans Gambit, Anderssen Variation, Cordel Line\",\"l2w69t2nmk\":\"C51|Italian Game: Evans Gambit, Fontaine Countergambit\",\"14jn2dqg92l\":\"C51|Italian Game: Evans Gambit, Fraser Attack\",\"2eg4b6arn4i\":\"C51|Italian Game: Evans Gambit, Fraser-Mortimer Attack\",\"1cf9eteh0yf\":\"C51|Italian Game: Evans Gambit, Göring Attack\",\"mkmplld8sc\":\"C51|Italian Game: Evans Gambit, Harding Variation\",\"25xsyljtma3\":\"C51|Italian Game: Evans Gambit, Hein Countergambit\",\"8uvh0bevon\":\"C51|Italian Game: Evans Gambit, Mayet Defense\",\"1vrr2dgxep6\":\"C51|Italian Game: Evans Gambit, McDonnell Defense\",\"nhk5qjo2ks\":\"C51|Italian Game: Evans Gambit, McDonnell Defense, Main Line\",\"ftehy9z9ie\":\"C51|Italian Game: Evans Gambit, Morphy Attack\",\"kv51cc4cdk\":\"C51|Italian Game: Evans Gambit, Mortimer-Evans Gambit\",\"51bd4ffexs\":\"C51|Italian Game: Evans Gambit, Paulsen Variation\",\"1l2nbwtm0m2\":\"C51|Italian Game: Evans Gambit, Steinitz Variation\",\"1vo2rx379o0\":\"C51|Italian Game: Evans Gambit, Stone-Ware Variation\",\"qtwxx97x5u\":\"C51|Italian Game: Evans Gambit, Ulvestad Variation\",\"d45odpq8sv\":\"C52|Italian Game: Evans Gambit\",\"2aybfwb85xu\":\"C52|Italian Game: Evans Gambit, Alapin-Steinitz Variation\",\"8kllq6tzxm\":\"C52|Italian Game: Evans Gambit, Anderssen Defense\",\"7btux57gzo\":\"C52|Italian Game: Evans Gambit, Bronstein Defense\",\"2c5108rjnul\":\"C52|Italian Game: Evans Gambit, Compromised Defense\",\"1fui2iegnui\":\"C52|Italian Game: Evans Gambit, Compromised Defense, Main Line\",\"mgnl8cg1c5\":\"C52|Italian Game: Evans Gambit, Compromised Defense, Potter Variation\",\"2eqsei0gnra\":\"C52|Italian Game: Evans Gambit, Dufresne Defense\",\"hfrpcjp8ex\":\"C52|Italian Game: Evans Gambit, Johner Defense\",\"x0ttg5rppo\":\"C52|Italian Game: Evans Gambit, Laroche Variation\",\"80p6uhsz6k\":\"C52|Italian Game: Evans Gambit, Lasker Defense\",\"2a7z4t0lgfm\":\"C52|Italian Game: Evans Gambit, Leonhardt Countergambit\",\"154a8lyy8b1\":\"C52|Italian Game: Evans Gambit, Levenfish Variation\",\"1zudm5t4wq3\":\"C52|Italian Game: Evans Gambit, Main Line\",\"19en9h1kmcm\":\"C52|Italian Game: Evans Gambit, Mieses Defense\",\"2bhhmbha7c4\":\"C52|Italian Game: Evans Gambit, Pierce Defense\",\"2gh0gbr0q65\":\"C52|Italian Game: Evans Gambit, Richardson Attack\",\"pyp9i4of8l\":\"C52|Italian Game: Evans Gambit, Sanders-Alapin Variation\",\"6gwtszbi95\":\"C52|Italian Game: Evans Gambit, Slow Variation\",\"27j1vylz994\":\"C52|Italian Game: Evans Gambit, Sokolsky Variation\",\"893dub094l\":\"C52|Italian Game: Evans Gambit, Tartakower Attack\",\"kplroheyk0\":\"C52|Italian Game: Evans Gambit, Waller Attack\",\"pfvtkgokrt\":\"C53|Italian Game: Bird's Attack\",\"1fs4v8izh0f\":\"C53|Italian Game: Classical Variation\",\"i11wn8w5su\":\"C53|Italian Game: Classical Variation, Center Holding Variation\",\"ph0zmtt9fm\":\"C53|Italian Game: Classical Variation, Closed Variation\",\"193env2elqm\":\"C53|Italian Game: Classical Variation, Eisinger Variation\",\"1k4hp5ec6ox\":\"C53|Italian Game: Classical Variation, La Bourdonnais Variation\",\"211x5bjd7tp\":\"C53|Italian Game: Classical Variation, Mestel Variation\",\"18p7oy1xjm6\":\"C53|Italian Game: Classical Variation, Tarrasch Variation\",\"x7o2txaeg5\":\"C54|Italian Game: Classical Variation\",\"g12bgm4axj\":\"C54|Italian Game: Classical Variation, Center Attack\",\"17f4xu50jql\":\"C54|Italian Game: Classical Variation, Ghulam-Kassim Variation\",\"110pw6qyxz7\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"17zy9n3px40\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"22c9icdrrkw\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"4daq0rtlo6\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"1htx13a1q70\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"8fzu7k11ni\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"1lf31bguns2\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"29bxb551y9w\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"1qkysllrmrk\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"16arb44o58e\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"24ga5hltiyq\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"1vdl6gi3wmr\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"1o3ac2iggvw\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"sejxx76bzb\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"2ao1bd58077\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"r08nxaum3c\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"1ghqbizsymn\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo\",\"lc1frrp45w\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, Albin Variation\",\"i5yyp6f0vd\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, Main Line\",\"vl5cfrlqi4\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, with a4 a5\",\"jwfwf85rm7\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, with a5\",\"6whwrto6gn\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, with a6\",\"1y71nc7mxku\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, with a6\",\"2g36zi5n1r4\":\"C54|Italian Game: Classical Variation, Giuoco Pianissimo, with h6\",\"2gg2aaxchb1\":\"C54|Italian Game: Classical Variation, Greco Gambit, Anderssen Variation\",\"1w0gtkn9ke\":\"C54|Italian Game: Classical Variation, Greco Gambit, Dubov Italian\",\"19rf8flgqiu\":\"C54|Italian Game: Classical Variation, Greco Gambit, Greco Variation\",\"gjuhh2y7su\":\"C54|Italian Game: Classical Variation, Greco Gambit, Main Line\",\"nf3k9jf5fd\":\"C54|Italian Game: Classical Variation, Greco Gambit, Modern Line\",\"1u323tjeyls\":\"C54|Italian Game: Classical Variation, Greco Gambit, Modern Line\",\"14vuq3m2fzq\":\"C54|Italian Game: Classical Variation, Greco Gambit, Moeller-Bayonet Attack\",\"183h3n81tmu\":\"C54|Italian Game: Classical Variation, Greco Gambit, Moeller-Therkatz Attack\",\"1smalezskt6\":\"C54|Italian Game: Classical Variation, Greco Gambit, Traditional Line\",\"20d78f4sn54\":\"C54|Italian Game: Classical Variation, with d5\",\"ui3jky5y2c\":\"C54|Italian Game: Giuoco Piano, Aitken Variation\",\"4j4rg0lofr\":\"C54|Italian Game: Giuoco Piano, Bernstein Variation\",\"f4zd5zxax4\":\"C54|Italian Game: Giuoco Piano, Cracow Variation\",\"29z9jq37kti\":\"C54|Italian Game: Giuoco Piano, Greco's Attack\",\"tjardql2wi\":\"C54|Italian Game: Giuoco Piano, Holzhausen Attack\",\"2gia3edrp9t\":\"C54|Italian Game: Giuoco Piano, Krause Variation\",\"1pp57z0xd9w\":\"C54|Italian Game: Giuoco Piano, Rosentreter Variation\",\"1l4hqzospb0\":\"C54|Italian Game: Giuoco Piano, Steinitz Variation\",\"292f9695xl7\":\"C54|Italian Game: Giuoco Piano, Therkatz-Herzog Variation\",\"1nf3ky7ljcw\":\"C55|Italian Game: Two Knights Defense\",\"61gic3g7f0\":\"C55|Italian Game: Two Knights Defense\",\"63fohsb47n\":\"C55|Italian Game: Two Knights Defense\",\"1r21pavu4dd\":\"C55|Italian Game: Two Knights Defense, Modern Bishop's Opening\",\"1aain2ind9a\":\"C55|Italian Game: Two Knights Defense, Modern Bishop's Opening\",\"19bx432rmk6\":\"C55|Italian Game: Two Knights Defense, Modern Bishop's Opening\",\"2gmqftx2ue2\":\"C56|Italian Game: Scotch Gambit\",\"ngqdjzpef7\":\"C56|Italian Game: Scotch Gambit, Anderssen Attack\",\"hdqd4qhjh6\":\"C56|Italian Game: Scotch Gambit, Anderssen Attack, Main Line\",\"1y1q4kam3pe\":\"C56|Italian Game: Scotch Gambit, Canal Variation\",\"1gtwm1c8eh5\":\"C56|Italian Game: Scotch Gambit, Double Gambit Accepted\",\"1ujgtwxe60w\":\"C56|Italian Game: Scotch Gambit, Janowski Defense\",\"1eyznntq88m\":\"C56|Italian Game: Scotch Gambit, Max Lange Attack\",\"1y7e09atmr8\":\"C56|Italian Game: Scotch Gambit, Max Lange Attack\",\"1b72je4hq1t\":\"C56|Italian Game: Scotch Gambit, Max Lange Attack Accepted\",\"1k7bce3rp8h\":\"C56|Italian Game: Scotch Gambit, Max Lange Attack, Long Variation\",\"11sux6ubj11\":\"C56|Italian Game: Scotch Gambit, Max Lange Attack, Spielmann Defense\",\"11ycvohd3fs\":\"C56|Italian Game: Scotch Gambit, Nakhmanson Gambit\",\"17e4l0bg6w5\":\"C56|Italian Game: Scotch Gambit, Walbrodt-Baird Gambit\",\"25u50r0lqk0\":\"C56|Italian Game: Scotch Gambit, de Riviere Defense\",\"1wi7mgidacn\":\"C56|Italian Game: Scotch Invitation Declined\",\"4dxqsbvx2i\":\"C56|Italian Game: Two Knights Defense, Keidansky Variation\",\"1gwyws5j7fg\":\"C56|Italian Game: Two Knights Defense, Max Lange Attack\",\"1j8b78suxuc\":\"C56|Italian Game: Two Knights Defense, Max Lange Attack, Berger Variation\",\"188kdgwvfz2\":\"C56|Italian Game: Two Knights Defense, Max Lange Attack, Krause Variation\",\"mlucdjxfce\":\"C56|Italian Game: Two Knights Defense, Max Lange Attack, Loman Defense\",\"2cxhg9ot9y5\":\"C56|Italian Game: Two Knights Defense, Max Lange Attack, Rubinstein Variation\",\"2euxtn2vnes\":\"C56|Italian Game: Two Knights Defense, Open Variation\",\"bd4pnwv3wy\":\"C56|Italian Game: Two Knights Defense, Perreux Variation\",\"1toi8xdwo88\":\"C56|Italian Game: Two Knights Defense, Yurdansky Attack\",\"21a39qemian\":\"C57|Italian Game: Two Knights Defense, Fegatello Attack, Leonhardt Variation\",\"269ng2iek2\":\"C57|Italian Game: Two Knights Defense, Fried Liver Attack\",\"10yyidvjvuw\":\"C57|Italian Game: Two Knights Defense, Fritz Variation\",\"2bjglnizw8w\":\"C57|Italian Game: Two Knights Defense, Fritz, Gruber Variation\",\"ts279dewsv\":\"C57|Italian Game: Two Knights Defense, Kloss Gambit\",\"2cpdto67gia\":\"C57|Italian Game: Two Knights Defense, Knight Attack\",\"19nh452q2ph\":\"C57|Italian Game: Two Knights Defense, Knight Attack, Normal Variation\",\"66wqnqtf7r\":\"C57|Italian Game: Two Knights Defense, Lolli Attack\",\"va9wjnmj3p\":\"C57|Italian Game: Two Knights Defense, Pincus Variation\",\"1l25rhwxvj4\":\"C57|Italian Game: Two Knights Defense, Ponziani-Steinitz Gambit\",\"15lp6wi1azi\":\"C57|Italian Game: Two Knights Defense, Traxler Counterattack\",\"2b5nas5g9hu\":\"C57|Italian Game: Two Knights Defense, Traxler Counterattack, Bishop Sacrifice Line\",\"2alpr52hunz\":\"C57|Italian Game: Two Knights Defense, Traxler Counterattack, King March Line\",\"3yb695oha3\":\"C57|Italian Game: Two Knights Defense, Traxler Counterattack, Knight Sacrifice Line\",\"16n8cc9h7pg\":\"C57|Italian Game: Two Knights Defense, Traxler Variation, Trencianske-Teplice Gambit\",\"1nq393mjs30\":\"C57|Italian Game: Two Knights Defense, Ulvestad Variation\",\"2485ufv635d\":\"C57|Italian Game: Two Knights Defense, Ulvestad Variation, Kurkin Gambit\",\"226q1leehnv\":\"C58|Italian Game: Two Knights Defense\",\"bglkamuic\":\"C58|Italian Game: Two Knights Defense, Blackburne Variation\",\"1q7wr5rm2nu\":\"C58|Italian Game: Two Knights Defense, Colman Variation\",\"1nuj5k53p6y\":\"C58|Italian Game: Two Knights Defense, Maróczy Variation\",\"6pdmf6m2c4\":\"C58|Italian Game: Two Knights Defense, Paoli Variation\",\"zfxh7ksdte\":\"C58|Italian Game: Two Knights Defense, Polerio Defense\",\"uizk3x4zkg\":\"C58|Italian Game: Two Knights Defense, Polerio Defense, Bishop Check Line\",\"1v184w9vga9\":\"C58|Italian Game: Two Knights Defense, Polerio Defense, Bogoljubow Variation\",\"2bi7tws0kvi\":\"C58|Italian Game: Two Knights Defense, Polerio Defense, Kieseritzky Variation\",\"2cyn0e0wp6e\":\"C58|Italian Game: Two Knights Defense, Polerio Defense, Yankovich Variation\",\"1e0pj8bqmu\":\"C59|Italian Game: Two Knights Defense, Knorre Variation\",\"x8ep31j5tl\":\"C59|Italian Game: Two Knights Defense, Polerio Defense, Göring Variation\",\"2dmpyk7iww7\":\"C59|Italian Game: Two Knights Defense, Polerio Defense, Suhle Defense\",\"1wohf8su3h8\":\"C59|Italian Game: Two Knights Defense, Steinitz Variation\",\"29imrkv12cu\":\"C60|Ruy Lopez\",\"1ollkrk32ni\":\"C60|Ruy Lopez: Alapin Defense\",\"9jcnozotvb\":\"C60|Ruy Lopez: Alapin Defense, Alapin Gambit\",\"oxmo18apj9\":\"C60|Ruy Lopez: Brentano Gambit\",\"5xpeni7e61\":\"C60|Ruy Lopez: Bulgarian Variation\",\"1ftfpg2tfyh\":\"C60|Ruy Lopez: Cozio Defense\",\"1vc6q32v3tr\":\"C60|Ruy Lopez: Cozio Defense, Paulsen Variation\",\"2f3mybvf63q\":\"C60|Ruy Lopez: Cozio Defense, Tartakower Gambit\",\"16wamdcg5tj\":\"C60|Ruy Lopez: Fianchetto Defense\",\"1jxbghvryub\":\"C60|Ruy Lopez: Fianchetto Defense, Kevitz Gambit\",\"x9xanbs48k\":\"C60|Ruy Lopez: Lucena Variation\",\"1641di8769u\":\"C60|Ruy Lopez: Nürnberg Variation\",\"15nltpietbi\":\"C60|Ruy Lopez: Pollock Defense\",\"1akh9c0w6gq\":\"C60|Ruy Lopez: Retreat Variation\",\"220k88i9cdt\":\"C60|Ruy Lopez: Rotary-Albany Gambit\",\"24ts2g3lfj7\":\"C60|Ruy Lopez: Spanish Countergambit\",\"1hrzrwt1pw5\":\"C60|Ruy Lopez: Spanish Countergambit, Harding Countergambit, Fricke Gambit\",\"fkficqw1yz\":\"C60|Ruy Lopez: Spanish Countergambit, Harding Gambit\",\"1elwvmudual\":\"C60|Ruy Lopez: Vinogradov Variation\",\"1czaezuimj\":\"C61|Ruy Lopez: Bird Variation\",\"tl21v2y15m\":\"C61|Ruy Lopez: Bird Variation, Paulsen Variation\",\"1jpqci5qtaz\":\"C62|Ruy Lopez: Steinitz Defense\",\"2qwkzfxrqk\":\"C62|Ruy Lopez: Steinitz Defense\",\"1gi2xcl3a7s\":\"C62|Ruy Lopez: Steinitz Defense, Center Gambit\",\"1fx52r3i0ve\":\"C62|Ruy Lopez: Steinitz Defense, Nimzowitsch Attack\",\"1s87rrxepgt\":\"C62|Ruy Lopez: Steinitz Defense, Semi-Duras Variation\",\"1b05ve5hwtq\":\"C63|Ruy Lopez: Schliemann Defense\",\"2auh2473t1v\":\"C63|Ruy Lopez: Schliemann Defense, Classical Variation\",\"1uvg6mkbkob\":\"C63|Ruy Lopez: Schliemann Defense, Dyckhoff Variation\",\"10u4ipn48g2\":\"C63|Ruy Lopez: Schliemann Defense, Exchange Variation\",\"ycf5kvmawk\":\"C63|Ruy Lopez: Schliemann Defense, Jaenisch Gambit Accepted\",\"qol2s0iczm\":\"C63|Ruy Lopez: Schliemann Defense, Kostić Defense\",\"279dyh8dbdg\":\"C63|Ruy Lopez: Schliemann Defense, Möhring Variation\",\"147fie0yxyf\":\"C63|Ruy Lopez: Schliemann Defense, Schönemann Attack\",\"1cn6lppozcj\":\"C63|Ruy Lopez: Schliemann Defense, Tartakower Variation\",\"1akshru0rwu\":\"C64|Ruy Lopez: Classical Defense, Benelux Variation\",\"uhenzrc3iw\":\"C64|Ruy Lopez: Classical Defense, Boden Variation\",\"sfnqr3zkol\":\"C64|Ruy Lopez: Classical Defense, Zaitsev Variation\",\"1gy8uss0pqa\":\"C64|Ruy Lopez: Classical Variation\",\"1adgvrnx6nv\":\"C64|Ruy Lopez: Classical Variation, Central Variation\",\"pta34ran7e\":\"C64|Ruy Lopez: Classical Variation, Charousek Variation\",\"3tdnnllmgs\":\"C64|Ruy Lopez: Classical Variation, Cordel Gambit\",\"1fhggte2o84\":\"C64|Ruy Lopez: Classical Variation, Konikowski Gambit\",\"1aapk3yzft0\":\"C64|Ruy Lopez: Classical Variation, Modern Main Line\",\"i9qk3ht6dn\":\"C64|Ruy Lopez: Classical Variation, Spanish Wing Gambit\",\"1s9lnpj7x7j\":\"C65|Ruy Lopez: Berlin Defense\",\"1ocdaipr1vf\":\"C65|Ruy Lopez: Berlin Defense\",\"140q7vtrznb\":\"C65|Ruy Lopez: Berlin Defense, Anti-Berlin Variation\",\"8qy541o0en\":\"C65|Ruy Lopez: Berlin Defense, Anti-Berlin Variation, Anderssen Variation\",\"1w50i3jsjda\":\"C65|Ruy Lopez: Berlin Defense, Anti-Berlin Variation, Duras Variation\",\"59p6stqox5\":\"C65|Ruy Lopez: Berlin Defense, Anti-Berlin Variation, Kaufmann Variation\",\"2051qvk55wv\":\"C65|Ruy Lopez: Berlin Defense, Anti-Berlin Variation, Mortimer Trap\",\"8e40btbyui\":\"C65|Ruy Lopez: Berlin Defense, Anti-Berlin Variation, Mortimer Variation\",\"224gfveqwtk\":\"C65|Ruy Lopez: Berlin Defense, Beverwijk Variation\",\"1ne2pphxph7\":\"C65|Ruy Lopez: Berlin Defense, Fishing Pole Variation\",\"m9zqd2buda\":\"C65|Ruy Lopez: Berlin Defense, Nyholm Attack\",\"12jc7p3qy9z\":\"C65|Ruy Lopez: Classical Variation, Zukertort Gambit\",\"4947pdnsaf\":\"C65|Ruy Lopez: Halloween Attack\",\"nrxdd982jy\":\"C66|Ruy Lopez: Berlin Defense, Closed Bernstein Variation\",\"2cjlzt4anvf\":\"C66|Ruy Lopez: Berlin Defense, Closed Showalter Variation\",\"25z3jz3ckto\":\"C66|Ruy Lopez: Berlin Defense, Closed Wolf Variation\",\"xnjuutgnpl\":\"C66|Ruy Lopez: Berlin Defense, Hedgehog Variation\",\"29ahokzj0r0\":\"C66|Ruy Lopez: Berlin Defense, Improved Steinitz Defense\",\"28xu91dkxq8\":\"C66|Ruy Lopez: Berlin Defense, Tarrasch Trap\",\"2c1vxljzdu0\":\"C66|Ruy Lopez: Closed Berlin Defense, Chigorin Variation\",\"2d7rrzoev0g\":\"C67|Ruy Lopez: Berlin Defense, Berlin Wall\",\"1r9ldk6q9w3\":\"C67|Ruy Lopez: Berlin Defense, Cordel Variation\",\"2dry7seytha\":\"C67|Ruy Lopez: Berlin Defense, Minckwitz Variation\",\"23e5xxh1aj9\":\"C67|Ruy Lopez: Berlin Defense, Pillsbury Variation\",\"14rg72e94mr\":\"C67|Ruy Lopez: Berlin Defense, Rio Gambit Accepted\",\"19vngw10i3u\":\"C67|Ruy Lopez: Berlin Defense, Rio de Janeiro Variation\",\"1gh5v18vw9g\":\"C67|Ruy Lopez: Berlin Defense, Rio de Janeiro Variation\",\"1ib8tt9py0w\":\"C67|Ruy Lopez: Berlin Defense, Rosenthal Variation\",\"1gac7acd4uq\":\"C67|Ruy Lopez: Berlin Defense, Trifunovic Variation\",\"yzaw3ik0nm\":\"C67|Ruy Lopez: Berlin Defense, Winawer Attack\",\"100p1olcmw1\":\"C67|Ruy Lopez: Berlin Defense, Zukertort Variation\",\"11d45qzgd5s\":\"C67|Ruy Lopez: Berlin Defense, l'Hermet Variation\",\"7n5rdgsowe\":\"C67|Ruy Lopez: Berlin Defense, l'Hermet Variation, Berlin Wall Defense\",\"ofmqadsjb7\":\"C67|Ruy Lopez: Berlin Defense, l'Hermet Variation, Westerinen Line\",\"1n9qqvlc4w4\":\"C67|Ruy Lopez: Open Berlin Defense, Showalter Variation\",\"247zunv45fg\":\"C67|Ruy Lopez: Open Berlin Defense, l'Hermet Variation\",\"14om9ca3jsu\":\"C68|Ruy Lopez: Exchange Variation\",\"11rh6e2fjq\":\"C68|Ruy Lopez: Exchange Variation, Alekhine Variation\",\"1spxgkckthq\":\"C68|Ruy Lopez: Exchange Variation, Keres Variation\",\"pn2g8m8axo\":\"C68|Ruy Lopez: Exchange Variation, Lutikov Variation\",\"ip66aoe9rl\":\"C68|Ruy Lopez: Exchange Variation, Romanovsky Variation\",\"karhg2qfey\":\"C68|Ruy Lopez: Exchange, Alekhine Variation\",\"gi7akquf02\":\"C69|Ruy Lopez: Exchange Variation, Alapin Gambit\",\"21l31za3ecb\":\"C69|Ruy Lopez: Exchange Variation, Bronstein Variation\",\"1ewu5119crm\":\"C69|Ruy Lopez: Exchange Variation, Gligoric Variation\",\"1e3ylmokzfg\":\"C69|Ruy Lopez: Exchange Variation, King's Bishop Variation\",\"wlecdgoav3\":\"C69|Ruy Lopez: Exchange Variation, Normal Variation\",\"dadm3rt9rj\":\"C70|Ruy Lopez: Bird's Defense Deferred\",\"2021ztg870c\":\"C70|Ruy Lopez: Morphy Defense\",\"1ktypp2d0e7\":\"C70|Ruy Lopez: Morphy Defense, Alapin's Defense Deferred\",\"2d40rjx4zr2\":\"C70|Ruy Lopez: Morphy Defense, Caro Variation\",\"gv33e94qah\":\"C70|Ruy Lopez: Morphy Defense, Classical Defense Deferred\",\"152cvsx129o\":\"C70|Ruy Lopez: Morphy Defense, Cozio Defense\",\"s9pg80ol29\":\"C70|Ruy Lopez: Morphy Defense, Fianchetto Defense Deferred\",\"c2qnqucjbh\":\"C70|Ruy Lopez: Morphy Defense, Graz Variation\",\"1g1ae3yynrj\":\"C70|Ruy Lopez: Morphy Defense, Norwegian Variation\",\"1j8b1nacnc3\":\"C70|Ruy Lopez: Morphy Defense, Norwegian Variation, Nightingale Gambit\",\"qnmtuwnpxc\":\"C70|Ruy Lopez: Morphy Defense, Schliemann Defense Deferred\",\"1y01zetqwn6\":\"C70|Ruy Lopez: Morphy Defense, Schliemann Defense Deferred, Jaenisch Gambit Deferred\",\"8ijupx0uik\":\"C71|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"1vx6xiraha0\":\"C71|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"1qdsvhzfucz\":\"C71|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"ghat4qxh4y\":\"C71|Ruy Lopez: Noah's Ark Trap\",\"1d0bxglv5x4\":\"C72|Ruy Lopez: Closed, Kecskemet Variation\",\"12h984f7clc\":\"C72|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"1r31g8fw9vt\":\"C73|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"liny0e56mx\":\"C73|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"1qv59mvz8ke\":\"C74|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"33exh6bq5u\":\"C74|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"trornjtt94\":\"C74|Ruy Lopez: Morphy Defense, Modern Steinitz Defense, Siesta Variation\",\"761n4e3tlk\":\"C75|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"zz3smd9rkg\":\"C75|Ruy Lopez: Morphy Defense, Modern Steinitz Defense\",\"yveus1jr72\":\"C76|Ruy Lopez: Morphy Defense, Modern Steinitz Defense, Fianchetto Variation\",\"ow24pupxhb\":\"C77|Ruy Lopez: Morphy Defense, Anderssen Variation\",\"21fds6fhwe0\":\"C77|Ruy Lopez: Morphy Defense, Bayreuth Variation\",\"n9zyc8o0mo\":\"C77|Ruy Lopez: Morphy Defense, Duras Variation\",\"1pf01o9ukak\":\"C77|Ruy Lopez: Morphy Defense, Jaffe Gambit\",\"2ayjas4pstp\":\"C77|Ruy Lopez: Morphy Defense, Mackenzie Variation\",\"1fjcvnkk5ma\":\"C77|Ruy Lopez: Morphy Defense, Tarrasch Variation\",\"xwns3nevt3\":\"C77|Ruy Lopez: Morphy Defense, Wormald Attack\",\"1wo2cib81om\":\"C77|Ruy Lopez: Wormald Attack, Grünfeld Variation\",\"25t4gqk18pe\":\"C78|Ruy Lopez: Brix Variation\",\"1crgasecb55\":\"C78|Ruy Lopez: Central Countergambit\",\"1br8z9x7m6t\":\"C78|Ruy Lopez: Morphy Defense\",\"18t5bel1h99\":\"C78|Ruy Lopez: Morphy Defense\",\"e08b524mq2\":\"C78|Ruy Lopez: Morphy Defense, Arkhangelsk Variation\",\"1f15fca3ar3\":\"C78|Ruy Lopez: Morphy Defense, Møller Variation\",\"12vnv8agdag\":\"C78|Ruy Lopez: Morphy Defense, Neo-Arkhangelsk Variation\",\"19hxqk9t6zt\":\"C78|Ruy Lopez: Morphy Defense, Wing Attack\",\"17yfgxznmrh\":\"C78|Ruy Lopez: Rabinovich Variation\",\"1c0mqlqzmrr\":\"C79|Ruy Lopez: Morphy Defense, Steinitz Deferred\",\"2touxfa8st\":\"C79|Ruy Lopez: Morphy Defense, Steinitz Deferred\",\"4rake1ci1q\":\"C79|Ruy Lopez: Steinitz Defense Deferred, Boleslavsky Variation\",\"yzh3vhc7ff\":\"C79|Ruy Lopez: Steinitz Defense Deferred, Lipnitsky Variation\",\"fx9tcdizte\":\"C80|Ruy Lopez: Morphy Defense, Tartakower Variation\",\"2gda71lhhuc\":\"C80|Ruy Lopez: Open\",\"1avyzvocjkt\":\"C80|Ruy Lopez: Open\",\"178qy6difhd\":\"C80|Ruy Lopez: Open\",\"1x1ndb25j7e\":\"C80|Ruy Lopez: Open\",\"1xo05luhooz\":\"C80|Ruy Lopez: Open, Berger Variation\",\"196d5pl3kxp\":\"C80|Ruy Lopez: Open, Bernstein Variation\",\"2bv6fr8zxvx\":\"C80|Ruy Lopez: Open, Bernstein Variation, Luther Line\",\"3lspo3u7pl\":\"C80|Ruy Lopez: Open, Friess Attack\",\"1rmzg0gvju\":\"C80|Ruy Lopez: Open, Harksen Gambit\",\"zm6hxlsrkr\":\"C80|Ruy Lopez: Open, Karpov Gambit\",\"uh2m2n9zbl\":\"C80|Ruy Lopez: Open, Knorre Variation\",\"10ljh925wyf\":\"C80|Ruy Lopez: Open, Main Line\",\"29g62ptvtxf\":\"C80|Ruy Lopez: Open, Richter Variation\",\"19s11f9eiaa\":\"C80|Ruy Lopez: Open, Riga Variation\",\"1moda3tgc72\":\"C80|Ruy Lopez: Open, Schlechter Defense\",\"1aid3yy31hf\":\"C80|Ruy Lopez: Open, Skipworth Gambit\",\"1a0jd77drup\":\"C80|Ruy Lopez: Open, Zukertort Variation\",\"9nv8ovlj48\":\"C81|Ruy Lopez: Open, Howell Attack\",\"vxormv0o2o\":\"C81|Ruy Lopez: Open, Howell Attack\",\"fanpe995fe\":\"C81|Ruy Lopez: Open, Howell Attack, Ekstrom Variation\",\"s39z2v7864\":\"C82|Ruy Lopez: Open\",\"1bcnpgh9viq\":\"C82|Ruy Lopez: Open, Berlin Variation\",\"222effh9agg\":\"C82|Ruy Lopez: Open, Dilworth Variation\",\"1anqg7md9wb\":\"C82|Ruy Lopez: Open, Italian Variation\",\"2d7tsq3y7n\":\"C82|Ruy Lopez: Open, Motzko Attack\",\"16tegtce26a\":\"C82|Ruy Lopez: Open, Motzko Attack, Nenarokov Variation\",\"26gxbhmbp6t\":\"C82|Ruy Lopez: Open, St. Petersburg Variation\",\"1kmpuj11mb7\":\"C83|Ruy Lopez: Open, Breslau Variation\",\"1ysfkci3hqu\":\"C83|Ruy Lopez: Open, Classical Defense\",\"10zusjepkd2\":\"C83|Ruy Lopez: Open, Classical Defense\",\"16oq18z06aj\":\"C83|Ruy Lopez: Open, Classical Defense, Main Line\",\"nv3zfoyc09\":\"C83|Ruy Lopez: Open, Malkin Variation\",\"1817z87stlo\":\"C83|Ruy Lopez: Open, Tarrasch Trap\",\"1ec4g3nw9y4\":\"C84|Ruy Lopez: Closed\",\"nlxml85lte\":\"C84|Ruy Lopez: Closed, Basque Gambit\",\"1cwx2pp1y33\":\"C84|Ruy Lopez: Closed, Center Attack\",\"qo19hr15nn\":\"C84|Ruy Lopez: Closed, Center Attack, Basque Gambit\",\"o4i9npdhds\":\"C84|Ruy Lopez: Closed, Martinez Variation\",\"1mc91vxzya7\":\"C84|Ruy Lopez: Closed, Morphy Attack\",\"140886mtzdt\":\"C85|Ruy Lopez: Closed, Delayed Exchange\",\"1vodxknej3z\":\"C86|Ruy Lopez: Closed, Worrall Attack\",\"vlmnw9tq8f\":\"C86|Ruy Lopez: Closed, Worrall Attack, Castling Line\",\"gquutyjlg8\":\"C86|Ruy Lopez: Closed, Worrall Attack, Castling Line\",\"1pzspmq59yi\":\"C86|Ruy Lopez: Closed, Worrall Attack, Delayed Castling Line\",\"2dleegzi0y7\":\"C87|Ruy Lopez: Closed, Averbakh Variation\",\"93nr2yfzm9\":\"C88|Ruy Lopez: Closed\",\"21yvlygx5og\":\"C88|Ruy Lopez: Closed\",\"5hzkz228aq\":\"C88|Ruy Lopez: Closed, Alekhine Gambit\",\"25ksgjijgmn\":\"C88|Ruy Lopez: Closed, Anti-Marshall\",\"1iya8ng8f8n\":\"C88|Ruy Lopez: Closed, Balla Variation\",\"mgoqagrxav\":\"C88|Ruy Lopez: Closed, Leonhardt Variation\",\"1fdm7qdskln\":\"C88|Ruy Lopez: Closed, Rosen Attack\",\"21d5znr8te8\":\"C88|Ruy Lopez: Closed, Trajkovic Counterattack\",\"2fmw9ivuy36\":\"C88|Ruy Lopez: Noah's Ark Trap\",\"i55jef94hk\":\"C89|Ruy Lopez: Marshall Attack\",\"1c8owr33r2l\":\"C89|Ruy Lopez: Marshall Attack\",\"15nfmcgn279\":\"C89|Ruy Lopez: Marshall Attack, Main Line\",\"4xgpztyygi\":\"C89|Ruy Lopez: Marshall Attack, Main Line, Spassky Variation\",\"1olktvpdo2g\":\"C89|Ruy Lopez: Marshall Attack, Modern Main Line\",\"1295dpnhgqn\":\"C89|Ruy Lopez: Marshall Attack, Modern Variation\",\"1wqz03jvjtl\":\"C89|Ruy Lopez: Marshall Attack, Original Marshall Attack\",\"1bm8dsfj3el\":\"C89|Ruy Lopez: Marshall Attack, Re3 Variation\",\"1ju560bo7oh\":\"C89|Ruy Lopez: Marshall Attack, Steiner Variation\",\"1vlzvfe7uw0\":\"C90|Ruy Lopez: Closed\",\"ok2x2bqg9w\":\"C90|Ruy Lopez: Closed, Lutikov Variation\",\"175kv2c9t\":\"C90|Ruy Lopez: Closed, Pilnik Variation\",\"2cwjgukjlxm\":\"C90|Ruy Lopez: Closed, Suetin Variation\",\"252rfn6qkpe\":\"C91|Ruy Lopez: Closed, Bogoljubow Variation\",\"66tqbnbac\":\"C91|Ruy Lopez: Closed, Yates Variation\",\"udt9h6aecx\":\"C91|Ruy Lopez: Closed, Yates Variation, Short Attack\",\"10ndy64m3vv\":\"C92|Ruy Lopez: Closed\",\"oahs75clum\":\"C92|Ruy Lopez: Closed, Flohr System\",\"28slg4fb9g0\":\"C92|Ruy Lopez: Closed, Karpov Variation\",\"a4qc23qfah\":\"C92|Ruy Lopez: Closed, Kholmov Variation\",\"2ezpz08ye7c\":\"C92|Ruy Lopez: Closed, Smyslov-Breyer-Zaitsev Hybrid\",\"fxufy4wddp\":\"C92|Ruy Lopez: Closed, Zaitsev System\",\"5x359le7xb\":\"C93|Ruy Lopez: Closed, Smyslov Defense\",\"1gsv2260bx0\":\"C94|Ruy Lopez: Closed, Breyer Defense\",\"6x8k7vzgo\":\"C94|Ruy Lopez: Closed, Breyer Defense, Quiet Variation\",\"1486fiqd30o\":\"C95|Ruy Lopez: Closed, Breyer\",\"16x3d6w9f8c\":\"C95|Ruy Lopez: Closed, Breyer Defense\",\"nwxdii3ms0\":\"C95|Ruy Lopez: Closed, Breyer Defense\",\"tiodxegccw\":\"C95|Ruy Lopez: Closed, Breyer Defense, Zaitsev Hybrid\",\"lflnyhnuh7\":\"C96|Ruy Lopez: Closed, Borisenko Variation\",\"spsk3grbdj\":\"C96|Ruy Lopez: Closed, Chigorin Defense\",\"22pef1wickd\":\"C96|Ruy Lopez: Closed, Chigorin Defense\",\"1n0blu7nv8y\":\"C96|Ruy Lopez: Closed, Chigorin Defense, Gajewski Gambit\",\"1y32178irpe\":\"C96|Ruy Lopez: Closed, Keres Defense\",\"en3f8sv13b\":\"C96|Ruy Lopez: Closed, Rossolimo Defense\",\"2gifzssl3k3\":\"C97|Ruy Lopez: Closed, Chigorin Defense\",\"17ux7d44osv\":\"C97|Ruy Lopez: Closed, Chigorin Defense\",\"1ii046rpv4e\":\"C97|Ruy Lopez: Closed, Chigorin, Yugoslav System\",\"avj8u1el6\":\"C98|Ruy Lopez: Closed, Chigorin Defense\",\"29fki1coc6k\":\"C98|Ruy Lopez: Closed, Chigorin Defense\",\"8qictcbe2b\":\"C99|Ruy Lopez: Closed, Chigorin Defense, Panov System\",\"uul4enkya\":\"D00|Amazon Attack\",\"2bdvdgbi1w2\":\"D00|Blackmar-Diemer Gambit\",\"1115icjf07a\":\"D00|Blackmar-Diemer Gambit\",\"1p11hucpz0p\":\"D00|Blackmar-Diemer Gambit Accepted\",\"yyh1vcgxlf\":\"D00|Blackmar-Diemer Gambit Accepted: Bogoljubow Defense\",\"25k89n706sm\":\"D00|Blackmar-Diemer Gambit Accepted: Bogoljubow Defense, Kloss Attack\",\"178i46z1yqd\":\"D00|Blackmar-Diemer Gambit Accepted: Bogoljubow Defense, Mad Dog Attack\",\"14xsw7jl241\":\"D00|Blackmar-Diemer Gambit Accepted: Bogoljubow Defense, Nimzowitsch Attack\",\"v8vf8kmznf\":\"D00|Blackmar-Diemer Gambit Accepted: Bogoljubow Defense, Studier Attack\",\"skjgnomwvh\":\"D00|Blackmar-Diemer Gambit Accepted: Euwe Defense\",\"2ga90yyjej0\":\"D00|Blackmar-Diemer Gambit Accepted: Euwe Defense, Duthilleul Gambit\",\"nwphbgpt0e\":\"D00|Blackmar-Diemer Gambit Accepted: Euwe Defense, Zilbermints Gambit\",\"18hd9m54n1v\":\"D00|Blackmar-Diemer Gambit Accepted: Gunderam Defense\",\"1beje3jwvlu\":\"D00|Blackmar-Diemer Gambit Accepted: Gunderam Defense, Stader Variation\",\"1742qju6sq6\":\"D00|Blackmar-Diemer Gambit Accepted: Holwell Defense\",\"2biwe2g9y7b\":\"D00|Blackmar-Diemer Gambit Accepted: Kaulich Defense\",\"2ffk7iuok70\":\"D00|Blackmar-Diemer Gambit Accepted: Pietrowsky Defense\",\"13b53grepsc\":\"D00|Blackmar-Diemer Gambit Accepted: Ritter Defense\",\"21k2cbbc7ee\":\"D00|Blackmar-Diemer Gambit Accepted: Ryder Gambit\",\"onsz7rje0y\":\"D00|Blackmar-Diemer Gambit Accepted: Schlutter Defense\",\"1bv2hnabrp0\":\"D00|Blackmar-Diemer Gambit Accepted: Teichmann Defense\",\"1spbdj8ni0n\":\"D00|Blackmar-Diemer Gambit Accepted: Teichmann Defense, Ciesielski Variation\",\"vadstnsdt9\":\"D00|Blackmar-Diemer Gambit Accepted: Teichmann Defense, Classical Variation\",\"1zi13d0rgng\":\"D00|Blackmar-Diemer Gambit Accepted: Teichmann Defense, Seidel-Hall Attack\",\"1vhgf9kadbr\":\"D00|Blackmar-Diemer Gambit Accepted: Ziegler Defense\",\"2bxsg62rwfj\":\"D00|Blackmar-Diemer Gambit Declined: Brombacher Countergambit\",\"29x1hfp1t1q\":\"D00|Blackmar-Diemer Gambit Declined: Elbert Countergambit\",\"1dg8bi6dd37\":\"D00|Blackmar-Diemer Gambit Declined: Gedult Defense\",\"1dhj9mahw7w\":\"D00|Blackmar-Diemer Gambit Declined: Lamb Defense\",\"55ep2wtjq8\":\"D00|Blackmar-Diemer Gambit Declined: Langeheinicke Defense\",\"6s5ew14unf\":\"D00|Blackmar-Diemer Gambit Declined: O'Kelly Defense\",\"5c0il90paq\":\"D00|Blackmar-Diemer Gambit Declined: Vienna Defense\",\"14ckvf2xyao\":\"D00|Blackmar-Diemer Gambit Declined: Weinsbach Defense\",\"1f7rxl65kbg\":\"D00|Blackmar-Diemer Gambit Declined: Weinsbach Defense, Pfrang Gambit\",\"7m404m8bs2\":\"D00|Blackmar-Diemer Gambit: Blackmar Gambit\",\"22o94dh88py\":\"D00|Blackmar-Diemer Gambit: Diemer-Rosenberg Attack\",\"1pjzr39qjbu\":\"D00|Blackmar-Diemer Gambit: Fritz Attack\",\"12igm52q990\":\"D00|Blackmar-Diemer Gambit: Lemberger Countergambit\",\"2a7vjtunrru\":\"D00|Blackmar-Diemer Gambit: Lemberger Countergambit, Endgame Variation\",\"1canqlnnaas\":\"D00|Blackmar-Diemer Gambit: Lemberger Countergambit, Lange Gambit\",\"v9dxfdjw0l\":\"D00|Blackmar-Diemer Gambit: Lemberger Countergambit, Rasmussen Attack\",\"140sjln7pr3\":\"D00|Blackmar-Diemer Gambit: Lemberger Countergambit, Sneiders Attack\",\"1fe5yqacvna\":\"D00|Blackmar-Diemer Gambit: Lemberger Countergambit, Soller Attack\",\"23ijvpl9wzi\":\"D00|Blackmar-Diemer Gambit: Netherlands Variation\",\"1kegfwbmpxc\":\"D00|Blackmar-Diemer Gambit: Rasa-Studier Gambit\",\"1liuomv09ii\":\"D00|Blackmar-Diemer Gambit: Reversed Albin Countergambit\",\"1m3urs8e3gx\":\"D00|Blackmar-Diemer Gambit: Zeller Defense\",\"v1bogpr6we\":\"D00|Blackmar-Diemer Gambit: Zeller Defense, Soller Attack\",\"cyk71wxs2z\":\"D00|Blackmar-Diemer Gambit: von Popiel Gambit\",\"2ftdfejl0v0\":\"D00|Blackmar-Diemer Gambit: von Popiel Gambit, Zilbermints Variation\",\"1v5jb6m35fl\":\"D00|Queen's Pawn Game\",\"21q8yciy41z\":\"D00|Queen's Pawn Game\",\"1h9io3e85ou\":\"D00|Queen's Pawn Game\",\"277g0rlvu8x\":\"D00|Queen's Pawn Game: Accelerated London System\",\"143mhngld5w\":\"D00|Queen's Pawn Game: Accelerated London System, Steinitz Countergambit\",\"2cg99wrfpgw\":\"D00|Queen's Pawn Game: Accelerated London System, Steinitz Countergambit Accepted\",\"idwqcbs3i5\":\"D00|Queen's Pawn Game: Accelerated London System, Steinitz Countergambit, Morris Countergambit\",\"15lq14q737w\":\"D00|Queen's Pawn Game: Accelerated London System, Steinitz Countergambit, Morris Countergambit Accepted\",\"2dhjf9fcnwi\":\"D00|Queen's Pawn Game: Chigorin Variation\",\"bs2prxx8qp\":\"D00|Queen's Pawn Game: Chigorin Variation\",\"9qfgy62jc5\":\"D00|Queen's Pawn Game: Chigorin Variation, Alburt Defense\",\"1p9xdehm61k\":\"D00|Queen's Pawn Game: Chigorin Variation, Anti-Veresov\",\"2cnc7brkuic\":\"D00|Queen's Pawn Game: Chigorin Variation, Fianchetto Defense\",\"2gmxkade588\":\"D00|Queen's Pawn Game: Chigorin Variation, Irish Gambit\",\"1ugob8h4w7i\":\"D00|Queen's Pawn Game: Chigorin Variation, Shaviliuk Gambit\",\"hzo4uydpl0\":\"D00|Queen's Pawn Game: Chigorin Variation, Shropshire Defense\",\"1aupxtb1y88\":\"D00|Queen's Pawn Game: Hübsch Gambit\",\"271tyytgb5u\":\"D00|Queen's Pawn Game: Levitsky Attack\",\"274m8t6hpjh\":\"D00|Queen's Pawn Game: Levitsky Attack, Welling Variation\",\"uca92dj65x\":\"D00|Queen's Pawn Game: Mason Attack\",\"s4y47uhlcd\":\"D00|Queen's Pawn Game: Stonewall Attack\",\"1s8lcqtte7z\":\"D00|Queen's Pawn Game: Zurich Gambit\",\"1s92g8i9tqb\":\"D01|Rapport-Jobava System\",\"ozcer8szqv\":\"D01|Rapport-Jobava System\",\"1nt3l4b5zhq\":\"D01|Rapport-Jobava System\",\"21xah9i3hxv\":\"D01|Rapport-Jobava System, with e6\",\"8rhuwi9rav\":\"D01|Richter-Veresov Attack\",\"uska8f431u\":\"D01|Richter-Veresov Attack\",\"1ryh9absn9t\":\"D01|Richter-Veresov Attack: Boyce Defense\",\"wpkhphcq2s\":\"D01|Richter-Veresov Attack: Malich Gambit\",\"1qpeyqgevlw\":\"D01|Richter-Veresov Attack: Richter Variation\",\"27poub59j6z\":\"D01|Richter-Veresov Attack: Two Knights System\",\"d5fdgoak0l\":\"D01|Richter-Veresov Attack: Two Knights System, Grünfeld Defense\",\"14zjpjhzgmi\":\"D01|Richter-Veresov Attack: Veresov Variation\",\"23btfqw9rea\":\"D02|London System: Poisoned Pawn Variation\",\"1zip6br70d0\":\"D02|Queen's Gambit Declined: Baltic Defense, Pseudo-Slav\",\"1rrmeo796ju\":\"D02|Queen's Pawn Game: Anti-Torre\",\"cjrgxsa358\":\"D02|Queen's Pawn Game: Chandler Gambit\",\"8non1zdf37\":\"D02|Queen's Pawn Game: Chigorin Variation\",\"23fqemlyr5j\":\"D02|Queen's Pawn Game: Krause Variation\",\"1w1tgel9scu\":\"D02|Queen's Pawn Game: Levitsky Attack, Euwe Variation, Modern Line\",\"1zf4zfhenj3\":\"D02|Queen's Pawn Game: London System\",\"wa45qvyhwh\":\"D02|Queen's Pawn Game: London System\",\"4014xn805w\":\"D02|Queen's Pawn Game: London System\",\"161n8n9qeio\":\"D02|Queen's Pawn Game: London System\",\"o6272u2g5h\":\"D02|Queen's Pawn Game: London System, Pterodactyl Variation\",\"xj9s2f8gp6\":\"D02|Queen's Pawn Game: London System, with e6\",\"1se5zjtvn3f\":\"D02|Queen's Pawn Game: London System, with e6\",\"19gxuops9ey\":\"D02|Queen's Pawn Game: Symmetrical Variation\",\"io1e8a3l2p\":\"D02|Queen's Pawn Game: Symmetrical Variation, Pseudo-Catalan\",\"a4zo6n6zmv\":\"D02|Queen's Pawn Game: Symmetrical Variation, Pseudo-Catalan\",\"oxyioxxmgh\":\"D02|Queen's Pawn Game: Symmetrical Variation, Pseudo-Catalan\",\"216xty4nkj7\":\"D02|Queen's Pawn Game: Zilbermints Countergambit\",\"1585qucknil\":\"D02|Queen's Pawn Game: Zukertort Variation\",\"1fvc38252bc\":\"D03|Queen's Pawn Game: Torre Attack\",\"2ctivtshsq\":\"D03|Queen's Pawn Game: Torre Attack\",\"11cc1fxo2bg\":\"D03|Queen's Pawn Game: Torre Attack\",\"1htdrae96n0\":\"D03|Queen's Pawn Game: Torre Attack\",\"1dmubd0upp5\":\"D03|Queen's Pawn Game: Torre Attack\",\"d87xu6ibuu\":\"D03|Queen's Pawn Game: Torre Attack\",\"yhgz4zab8e\":\"D03|Queen's Pawn Game: Torre Attack\",\"4odxykiw21\":\"D03|Queen's Pawn Game: Torre Attack\",\"eqsr56clfv\":\"D03|Queen's Pawn Game: Torre Attack\",\"1uuf07vyro5\":\"D03|Queen's Pawn Game: Torre Attack\",\"1bgrgi588i3\":\"D03|Queen's Pawn Game: Torre Attack\",\"8t4etrnjxa\":\"D03|Queen's Pawn Game: Torre Attack, Gossip Variation\",\"2b91ym5yjcu\":\"D03|Queen's Pawn Game: Torre Attack, Grünfeld Variation\",\"z5o0uyhvvp\":\"D03|Queen's Pawn Game: Torre Attack, Grünfeld Variation\",\"i0xlb6vb3h\":\"D04|Queen's Pawn Game: Colle System\",\"abz3eqgjxd\":\"D04|Queen's Pawn Game: Colle System, Anti-Colle\",\"1w1x9fu5dde\":\"D04|Queen's Pawn Game: Colle System, Grünfeld Formation\",\"fr0nl06a7p\":\"D05|Queen's Pawn Game: Colle System\",\"18l2eeu0ht1\":\"D05|Queen's Pawn Game: Colle System\",\"2djgnt5hzio\":\"D05|Queen's Pawn Game: Colle System\",\"1lbmjk1kv6a\":\"D05|Queen's Pawn Game: Colle System\",\"13omf4rxjzq\":\"D05|Queen's Pawn Game: Colle System\",\"1b5w6qg0ag5\":\"D05|Queen's Pawn Game: Colle System\",\"1kx0vkasd1w\":\"D05|Queen's Pawn Game: Colle System\",\"27l5nv9d7zi\":\"D05|Queen's Pawn Game: Colle System, Traditional Colle\",\"9uyaov6xek\":\"D05|Queen's Pawn Game: Zukertort Variation\",\"2flzvz75pks\":\"D05|Rubinstein Opening\",\"2d95itdmay4\":\"D05|Rubinstein Opening: Bogoljubow Defense\",\"ix2dra2vff\":\"D05|Rubinstein Opening: Classical Defense\",\"393q3a0yw5\":\"D05|Rubinstein Opening: Semi-Slav Defense\",\"37eruvfaca\":\"D05|Rubinstein Opening: Semi-Slav Defense\",\"rpiybel0u0\":\"D05|Rubinstein Opening: Semi-Slav Defense\",\"prps0x5xe3\":\"D06|Queen's Gambit\",\"28ypownuwcd\":\"D06|Queen's Gambit Declined: Austrian Attack, Salvio Countergambit\",\"1h4l50zq4u3\":\"D06|Queen's Gambit Declined: Austrian Defense\",\"1t1vcfb72am\":\"D06|Queen's Gambit Declined: Austrian Defense, Gusev Countergambit\",\"23v7sls0w0x\":\"D06|Queen's Gambit Declined: Austrian Defense, Haberditz Variation\",\"7wc32yu8e2\":\"D06|Queen's Gambit Declined: Baltic Defense\",\"1868mg9u7pp\":\"D06|Queen's Gambit Declined: Baltic Defense, Argentinian Gambit\",\"ybl9rf0hb8\":\"D06|Queen's Gambit Declined: Baltic Defense, Pseudo-Chigorin\",\"1hp0gvh0ghs\":\"D06|Queen's Gambit Declined: Baltic Defense, Queen Attack\",\"d7zkcbywfk\":\"D06|Queen's Gambit Declined: Baltic Defense, Queen Attack Deferred\",\"1xciss9tls5\":\"D06|Queen's Gambit Declined: Marshall Defense\",\"tp2fjoo9kj\":\"D06|Queen's Gambit Declined: Marshall Defense, Tan Gambit\",\"1ve230xbkrp\":\"D06|Queen's Gambit Declined: Zilbermints Gambit\",\"e1nxdow7ip\":\"D07|Queen's Gambit Declined: Chigorin Defense\",\"26ik4fkvety\":\"D07|Queen's Gambit Declined: Chigorin Defense\",\"3gzqtvom3r\":\"D07|Queen's Gambit Declined: Chigorin Defense\",\"2e8v64ltzzq\":\"D07|Queen's Gambit Declined: Chigorin Defense\",\"1cgwqszava4\":\"D07|Queen's Gambit Declined: Chigorin Defense\",\"8yuhamwg5r\":\"D07|Queen's Gambit Declined: Chigorin Defense, Exchange Variation\",\"237kp5kcy3w\":\"D07|Queen's Gambit Declined: Chigorin Defense, Exchange Variation, Costa's Line\",\"1kefbvvq5yr\":\"D07|Queen's Gambit Declined: Chigorin Defense, Janowski Variation\",\"jv26kr7lhh\":\"D07|Queen's Gambit Declined: Chigorin Defense, Lazard Gambit\",\"sgvv3cf0tt\":\"D07|Queen's Gambit Declined: Chigorin Defense, Main Line\",\"1yqio53mebg\":\"D07|Queen's Gambit Declined: Chigorin Defense, Main Line, Alekhine Variation\",\"2bd3d2qnd6g\":\"D07|Queen's Gambit Declined: Chigorin Defense, Modern Gambit\",\"7k6opu76eh\":\"D07|Queen's Gambit Declined: Chigorin Defense, Tartakower Gambit\",\"kgr9dzor5k\":\"D08|Queen's Gambit Declined: Albin Countergambit\",\"11eaehpfr8m\":\"D08|Queen's Gambit Declined: Albin Countergambit, Balogh Variation\",\"m2dkhhwcwk\":\"D08|Queen's Gambit Declined: Albin Countergambit, Janowski Variation\",\"1kfplgu82jf\":\"D08|Queen's Gambit Declined: Albin Countergambit, Krenosz Variation\",\"1bofi7hxktw\":\"D08|Queen's Gambit Declined: Albin Countergambit, Lasker Trap\",\"1tnafxm23vl\":\"D08|Queen's Gambit Declined: Albin Countergambit, Modern Line\",\"1n4594ce7fn\":\"D08|Queen's Gambit Declined: Albin Countergambit, Normal Line\",\"18x8lqjj80s\":\"D08|Queen's Gambit Declined: Albin Countergambit, Spassky Variation\",\"1d8a91wmyr2\":\"D08|Queen's Gambit Declined: Albin Countergambit, Tartakower Defense\",\"xrofw4kq9s\":\"D09|Queen's Gambit Declined: Albin Countergambit, Fianchetto Variation\",\"1vemkqqzi81\":\"D09|Queen's Gambit Declined: Albin Countergambit, Fianchetto Variation, Be6 Line\",\"sdm06a9ysm\":\"D09|Queen's Gambit Declined: Albin Countergambit, Fianchetto Variation, Bf5 Line\",\"1t4zaklqmxj\":\"D09|Queen's Gambit Declined: Albin Countergambit, Fianchetto Variation, Bg4 Line\",\"sdfi6rkj3c\":\"D10|Slav Defense\",\"1yzje5tnqu5\":\"D10|Slav Defense\",\"2b65cjlbk68\":\"D10|Slav Defense\",\"28ff4g1xrji\":\"D10|Slav Defense: Diemer Gambit\",\"itmimsv5ua\":\"D10|Slav Defense: Exchange Variation\",\"10dhmw5dnvq\":\"D10|Slav Defense: Exchange Variation, Boor Attack\",\"1abadax92nj\":\"D10|Slav Defense: Slav Gambit, Alekhine Attack\",\"e4757eyes9\":\"D10|Slav Defense: Winawer Countergambit\",\"rmhxetnfuo\":\"D10|Slav Defense: Winawer Countergambit, Anti-Winawer Gambit\",\"1kvoxj4huyt\":\"D11|Slav Defense: Bonet Gambit\",\"1bdmerxgjli\":\"D11|Slav Defense: Breyer Variation\",\"wy6wnwy16s\":\"D11|Slav Defense: Modern Line\",\"14724zx8gmr\":\"D11|Slav Defense: Modern Line\",\"2b0v20ef3hg\":\"D11|Slav Defense: Modern Line\",\"2160d228iry\":\"D11|Slav Defense: Modern Line\",\"155qbr6djaq\":\"D11|Slav Defense: Quiet Variation\",\"1gxfin144xl\":\"D11|Slav Defense: Quiet Variation, Pin Defense\",\"6spqt12dhh\":\"D12|Slav Defense: Quiet Variation, Amsterdam Variation\",\"1kt8e1zhoz4\":\"D12|Slav Defense: Quiet Variation, Landau Variation\",\"1eojgd3969k\":\"D12|Slav Defense: Quiet Variation, Schallopp Defense\",\"201fdc83krx\":\"D12|Slav Defense: Quiet Variation, Schallopp Defense\",\"vrnb6efqe6\":\"D13|Slav Defense: Exchange Variation\",\"19kee679lld\":\"D13|Slav Defense: Exchange Variation, Schallopp Variation\",\"1kqjzytiq4b\":\"D14|Slav Defense: Exchange Variation, Symmetrical Line\",\"27218bvc1iv\":\"D14|Slav Defense: Exchange Variation, Trifunovic Variation\",\"1lx502s3cfo\":\"D15|Slav Defense: Alekhine Variation\",\"9a9o836bbq\":\"D15|Slav Defense: Chebanenko Variation\",\"2a5izwxt197\":\"D15|Slav Defense: Chebanenko Variation\",\"1u3pcm9316w\":\"D15|Slav Defense: Chebanenko Variation, Advance System\",\"1y8870u1o4i\":\"D15|Slav Defense: Geller Gambit\",\"vocwllt2q7\":\"D15|Slav Defense: Geller Gambit\",\"1ds2ln0vvp4\":\"D15|Slav Defense: Schlechter Variation\",\"r8wl2whfrx\":\"D15|Slav Defense: Süchting Variation\",\"er18b4apfu\":\"D15|Slav Defense: Three Knights Variation\",\"m2xj92wzlx\":\"D15|Slav Defense: Two Knights Attack\",\"1h6g60xqltg\":\"D16|Slav Defense: Alapin Variation\",\"11dhfb3ym6h\":\"D16|Slav Defense: Smyslov Variation\",\"1vww8799kw7\":\"D16|Slav Defense: Soultanbeieff Variation\",\"1yyte0alvm9\":\"D16|Slav Defense: Steiner Variation\",\"2gbonm3v5yj\":\"D17|Slav Defense: Czech Variation\",\"15u48eeorgw\":\"D17|Slav Defense: Czech Variation, Bled Attack\",\"16klblpkd1x\":\"D17|Slav Defense: Czech Variation, Carlsbad Variation\",\"2jge2pnk7l\":\"D17|Slav Defense: Czech Variation, Carlsbad Variation, Morozevich Variation\",\"1clpyh9pa2u\":\"D17|Slav Defense: Czech Variation, Krause Attack\",\"d6bx9sby6z\":\"D17|Slav Defense: Czech Variation, Krause Attack, Fazekas Gambit\",\"gvkxtkxxhw\":\"D17|Slav Defense: Czech Variation, Wiesbaden Variation\",\"28l1mq6zch\":\"D17|Slav Defense: Czech Variation, Wiesbaden Variation, Sharp Line\",\"r14nov0zy9\":\"D18|Slav Defense: Czech Variation, Classical System\",\"mcob1gbkh2\":\"D18|Slav Defense: Czech Variation, Lasker Variation\",\"1cqzrebtmhb\":\"D19|Slav Defense: Czech Variation, Classical System, Main Line\",\"28e3g6kocjo\":\"D19|Slav Defense: Czech Variation, Dutch Variation\",\"kffs4mutsy\":\"D19|Slav Defense: Czech Variation, Dutch Variation, Sämisch Variation\",\"1pzkherb4dy\":\"D20|Queen's Gambit Accepted\",\"1oe3tjbey6n\":\"D20|Queen's Gambit Accepted: Accelerated Mannheim Variation\",\"xmomuxscf4\":\"D20|Queen's Gambit Accepted: Central Variation, Alekhine System\",\"1s0anrh2ewb\":\"D20|Queen's Gambit Accepted: Central Variation, Greco Variation\",\"o9mdftinlk\":\"D20|Queen's Gambit Accepted: Central Variation, McDonnell Defense\",\"v3kss85ll5\":\"D20|Queen's Gambit Accepted: Central Variation, McDonnell Defense, Somov Gambit\",\"1fupvjvfmrz\":\"D20|Queen's Gambit Accepted: Central Variation, Modern Defense\",\"z01vgiwqut\":\"D20|Queen's Gambit Accepted: Central Variation, Rubinstein Defense\",\"1oduhoaea81\":\"D20|Queen's Gambit Accepted: Central Variation, Rubinstein Defense, Yefimov Gambit\",\"1xd04jxugrr\":\"D20|Queen's Gambit Accepted: Linares Variation\",\"15ryksgf85i\":\"D20|Queen's Gambit Accepted: Old Variation\",\"1hjgsenaiqq\":\"D20|Queen's Gambit Accepted: Old Variation, Billinger Gambit\",\"2820fa44uyn\":\"D20|Queen's Gambit Accepted: Old Variation, Christensen Gambit\",\"qsb85vc6zp\":\"D20|Queen's Gambit Accepted: Old Variation, Korchnoi Gambit\",\"15yl59le2kp\":\"D20|Queen's Gambit Accepted: Old Variation, Novikov Gambit\",\"23ewvr7adsg\":\"D20|Queen's Gambit Accepted: Saduleto Variation\",\"1ewpmxl7qyi\":\"D20|Queen's Gambit Accepted: Schwartz Defense\",\"ywa351032t\":\"D21|Queen's Gambit Accepted: Alekhine Defense, Borisenko-Furman Variation\",\"b5985l5h8x\":\"D21|Queen's Gambit Accepted: Godes Variation\",\"1tshsmp1ckr\":\"D21|Queen's Gambit Accepted: Gunsberg Defense\",\"1bz97azt87y\":\"D21|Queen's Gambit Accepted: Normal Variation\",\"pxm74mr7dk\":\"D21|Queen's Gambit Accepted: Rosenthal Variation\",\"1xrxlzk63pm\":\"D21|Queen's Gambit Accepted: Slav Gambit\",\"1i570ckbeu7\":\"D22|Queen's Gambit Accepted: Alekhine Defense\",\"1m0p6pul677\":\"D22|Queen's Gambit Accepted: Alekhine Defense, Alatortsev Variation\",\"zjvqdmrzmc\":\"D22|Queen's Gambit Accepted: Alekhine Defense, Haberditz Variation\",\"13kf3g8dpwt\":\"D23|Queen's Gambit Accepted\",\"1jey4yi9wxv\":\"D23|Queen's Gambit Accepted: Mannheim Variation\",\"59rn14w7kh\":\"D23|Queen's Gambit Accepted: Mannheim Variation\",\"ntqpw3xai0\":\"D23|Queen's Gambit Accepted: Mannheim Variation\",\"uab3i78rkv\":\"D24|Queen's Gambit Accepted\",\"ux0x73dr7q\":\"D24|Queen's Gambit Accepted\",\"1ki6mmn5zed\":\"D24|Queen's Gambit Accepted: Bogoljubow Defense\",\"mfo4f5ennd\":\"D24|Queen's Gambit Accepted: Gunsberg Defense, Prianishenmo Gambit\",\"29vmv40w5z1\":\"D24|Queen's Gambit Accepted: Showalter Variation\",\"hr5c8t9qoi\":\"D25|Queen's Gambit Accepted: Janowski-Larsen Variation\",\"1je4ibkmnxk\":\"D25|Queen's Gambit Accepted: Normal Variation\",\"pf9m7d4zlt\":\"D25|Queen's Gambit Accepted: Smyslov Variation\",\"25bl90231ew\":\"D25|Queen's Gambit Accepted: Winawer Defense\",\"1pjdvgfdo9c\":\"D26|Queen's Gambit Accepted: Classical Defense\",\"14z68gdyjyq\":\"D26|Queen's Gambit Accepted: Classical Defense, Normal Line\",\"2b4gq39vu38\":\"D26|Queen's Gambit Accepted: Classical Defense, Steinitz Variation, Development Variation\",\"1idezvtsj2h\":\"D26|Queen's Gambit Accepted: Classical Defense, Steinitz Variation, Exchange Variation\",\"1hmrziwwz5l\":\"D26|Queen's Gambit Accepted: Classical, Furman Variation\",\"14q6v3ho8g6\":\"D26|Queen's Gambit Accepted: Normal Variation, .. a6 Sideline\",\"pts8fbdxbw\":\"D26|Queen's Gambit Accepted: Normal Variation, .. a6 Sideline\",\"1ihb4d3gt2a\":\"D26|Queen's Gambit Accepted: Normal Variation, Traditional System\",\"1do14r3jrrb\":\"D26|Queen's Gambit Accepted: Normal Variation, Traditional System\",\"1i9pn62aui\":\"D26|Queen's Gambit Accepted: Normal Variation, Traditional System\",\"1935mrfz8b9\":\"D26|Queen's Gambit Accepted: Normal Variation, Traditional System\",\"15yi0lfn4qs\":\"D27|Queen's Gambit Accepted: Classical Defense, Main Line\",\"1wz3j6km1x4\":\"D27|Queen's Gambit Accepted: Classical Defense, Main Line\",\"2bkdr0kclrp\":\"D27|Queen's Gambit Accepted: Classical Defense, Main Line\",\"5dl7zqvhwc\":\"D27|Queen's Gambit Accepted: Classical Defense, Rubinstein Variation\",\"1e1plep0po\":\"D27|Queen's Gambit Accepted: Classical Defense, Rubinstein Variation\",\"wqsj8p6qc7\":\"D27|Queen's Gambit Accepted: Classical Defense, Russian Gambit\",\"1ghiducrtp3\":\"D27|Queen's Gambit Accepted: Furman Variation\",\"1e17pi8r2av\":\"D28|Queen's Gambit Accepted: Classical Defense, Alekhine System\",\"267er90pie7\":\"D28|Queen's Gambit Accepted: Classical Defense, Alekhine System\",\"278eyqmgiwl\":\"D28|Queen's Gambit Accepted: Classical, Flohr Variation\",\"18jdyt3myfi\":\"D29|Queen's Gambit Accepted: Classical Defense, Alekhine System, Main Line\",\"1g4vs9eawyp\":\"D29|Queen's Gambit Accepted: Classical Defense, Alekhine System, Main Line\",\"1v45durf07c\":\"D29|Queen's Gambit Accepted: Classical Defense, Alekhine System, Smyslov Variation\",\"1fn8eph5ooq\":\"D30|Queen's Gambit Declined\",\"hpybk1od4s\":\"D30|Queen's Gambit Declined\",\"22enb5xc7mm\":\"D30|Queen's Gambit Declined: Capablanca Variation\",\"22nnappp9jq\":\"D30|Queen's Gambit Declined: Capablanca Variation\",\"1nw6njsdm63\":\"D30|Queen's Gambit Declined: Semmering Variation\",\"59f16aav7d\":\"D30|Queen's Gambit Declined: Spielmann Variation\",\"9jbw7akrsx\":\"D30|Queen's Gambit Declined: Stonewall Variation\",\"2m6uscyp7y\":\"D30|Queen's Gambit Declined: Tarrasch Defense, Pseudo-Tarrasch\",\"7x2e834y4q\":\"D30|Queen's Gambit Declined: Tarrasch Defense, Pseudo-Tarrasch Bishop Attack\",\"3519o6pxk\":\"D30|Queen's Gambit Declined: Traditional Variation\",\"1ju2pnvgoe8\":\"D30|Queen's Gambit Declined: Traditional Variation\",\"1jocw3gmbn7\":\"D30|Queen's Gambit Declined: Vienna Variation\",\"kwf6du21ut\":\"D30|Semi-Slav Defense: Quiet Variation\",\"hp073ehm8g\":\"D30|Semi-Slav Defense: Quiet Variation\",\"13ball199p4\":\"D31|Queen's Gambit Declined: Alapin Variation\",\"fue1f1pkqz\":\"D31|Queen's Gambit Declined: Charousek Variation\",\"21l0i9dtim3\":\"D31|Queen's Gambit Declined: Charousek Variation, Miladinovic Gambit\",\"15iyk6vr2nn\":\"D31|Queen's Gambit Declined: Janowski Variation\",\"hd514zt4dx\":\"D31|Queen's Gambit Declined: Queen's Knight Variation\",\"2okuxch4mv\":\"D31|Queen's Gambit Declined: Semi-Slav, Abrahams Variation\",\"2968211fgx9\":\"D31|Queen's Gambit Declined: Semi-Slav, Junge Variation\",\"1fd0i03m3xi\":\"D31|Queen's Gambit Declined: Semi-Slav, Koomen Variation\",\"190auudi7do\":\"D31|Semi-Slav Defense: Accelerated Move Order\",\"4rsx6goyv8\":\"D31|Semi-Slav Defense: Anti-Noteboom, Stonewall Variation\",\"yb35jynwbw\":\"D31|Semi-Slav Defense: Anti-Noteboom, Stonewall Variation, Portisch Gambit\",\"1u8xq7mxvcx\":\"D31|Semi-Slav Defense: Gunderam Gambit\",\"1zeq3x5wvvd\":\"D31|Semi-Slav Defense: Marshall Gambit\",\"syr5vhnymr\":\"D31|Semi-Slav Defense: Marshall Gambit, Forgotten Variation\",\"kdza2z96cm\":\"D31|Semi-Slav Defense: Marshall Gambit, Main Line\",\"kqt625lyqc\":\"D31|Semi-Slav Defense: Marshall Gambit, Tolush Variation\",\"iqul0upy95\":\"D31|Semi-Slav Defense: Noteboom Variation\",\"4cihl5m1e7\":\"D31|Semi-Slav Defense: Noteboom Variation, Abrahams Variation\",\"m70ssqkybf\":\"D31|Semi-Slav Defense: Noteboom Variation, Anti-Noteboom Gambit\",\"1p4wca4i9hw\":\"D31|Semi-Slav Defense: Noteboom Variation, Anti-Noteboom Variation\",\"q4epjtpaxg\":\"D31|Semi-Slav Defense: Noteboom Variation, Anti-Noteboom Variation, Belyavsky Line\",\"9m4wcd8yj1\":\"D32|Queen's Gambit Declined: Tarrasch Defense\",\"2cf8tlfw0vm\":\"D32|Queen's Gambit Declined: Tarrasch Defense\",\"2fyxocu3ptx\":\"D32|Queen's Gambit Declined: Tarrasch Defense\",\"828ogm9z2k\":\"D32|Queen's Gambit Declined: Tarrasch Defense\",\"1cg8l0zivdx\":\"D32|Tarrasch Defense\",\"1x9h21r8ld5\":\"D32|Tarrasch Defense: Grünfeld Gambit\",\"lksjla82ps\":\"D32|Tarrasch Defense: Marshall Gambit\",\"19jvp18v5dn\":\"D32|Tarrasch Defense: Schara Gambit\",\"1tzz1e5sf0m\":\"D32|Tarrasch Defense: Symmetrical Variation\",\"20qs4h37hb0\":\"D32|Tarrasch Defense: Symmetrical Variation\",\"1a3ywxi8x6p\":\"D32|Tarrasch Defense: Tarrasch Gambit\",\"2b5gf1nibxz\":\"D32|Tarrasch Defense: Two Knights Variation\",\"ls4p0b4xt3\":\"D32|Tarrasch Defense: von Hennig Gambit\",\"vrv2q0597m\":\"D33|Tarrasch Defense: Dubov Tarrasch\",\"1zy7hc7hlyy\":\"D33|Tarrasch Defense: Prague Variation\",\"1dsoe5poiuy\":\"D33|Tarrasch Defense: Rubinstein System\",\"gp0kj2ka28\":\"D33|Tarrasch Defense: Swedish Variation\",\"1cw3ekz6vas\":\"D33|Tarrasch Defense: Swedish Variation, Central Break\",\"s9h1j75wom\":\"D33|Tarrasch Defense: Wagner Variation\",\"13mj152m0k4\":\"D34|Queen's Gambit Declined: Tarrasch Defense, Stoltz Variation\",\"najom4sntz\":\"D34|Tarrasch Defense: Classical Variation\",\"21byq1lramd\":\"D34|Tarrasch Defense: Classical Variation, Advance Variation\",\"cngs0cde7a\":\"D34|Tarrasch Defense: Classical Variation, Bogoljubow Variation\",\"ldkj7ndyuf\":\"D34|Tarrasch Defense: Classical Variation, Carlsbad Variation\",\"1qty8rec0iy\":\"D34|Tarrasch Defense: Classical Variation, Chandler Variation\",\"24njoxc7jwf\":\"D34|Tarrasch Defense: Classical Variation, Classical Tarrasch Gambit\",\"41ncsfefjd\":\"D34|Tarrasch Defense: Classical Variation, Endgame Variation\",\"219llg1lvyk\":\"D34|Tarrasch Defense: Classical Variation, Main Line\",\"383zccu2be\":\"D34|Tarrasch Defense: Classical Variation, Petursson Variation\",\"15bxam1flft\":\"D34|Tarrasch Defense: Classical Variation, Réti Variation\",\"226cp5rbqeq\":\"D34|Tarrasch Defense: Classical Variation, Spassky Variation\",\"61tf0o8h4f\":\"D34|Tarrasch Defense: Prague Variation, Main Line\",\"lhq5ybu1zm\":\"D35|Queen's Gambit Declined: Exchange Variation\",\"1364fdrcfug\":\"D35|Queen's Gambit Declined: Exchange Variation\",\"y2atbpjflg\":\"D35|Queen's Gambit Declined: Exchange Variation\",\"1whmj11k3z1\":\"D35|Queen's Gambit Declined: Exchange Variation\",\"8bnb7afpvc\":\"D35|Queen's Gambit Declined: Exchange Variation, Carlsen Variation\",\"ip89mvtzqo\":\"D35|Queen's Gambit Declined: Exchange Variation, Chameleon Variation\",\"1k48xyfxad3\":\"D35|Queen's Gambit Declined: Exchange Variation, Positional Variation\",\"1elmswg4i4u\":\"D35|Queen's Gambit Declined: Exchange Variation, Positional Variation\",\"17xsc9sg6j2\":\"D35|Queen's Gambit Declined: Exchange Variation, Positional Variation\",\"18mjjpi26z1\":\"D35|Queen's Gambit Declined: Exchange Variation, Positional Variation\",\"2dytycd4347\":\"D35|Queen's Gambit Declined: Exchange Variation, Sämisch Variation\",\"2avig7yushq\":\"D35|Queen's Gambit Declined: Harrwitz Attack\",\"11vifgwvaor\":\"D35|Queen's Gambit Declined: Normal Defense\",\"ig3icew75f\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"2aq6qwinoox\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"n4ncg83hi3\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"1qyzg53smnm\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"hcxb5p2mzk\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"26nyy2ze6il\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"1k9wu1ia651\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"1bhgbhtzu9j\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"1qb3tlsuhmk\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"p8fd1khot9\":\"D36|Queen's Gambit Declined: Exchange Variation, Reshevsky Variation\",\"gc40vx3uo3\":\"D37|Queen's Gambit Declined: Barmen Variation\",\"ezbh3juu54\":\"D37|Queen's Gambit Declined: Harrwitz Attack\",\"2g780jp5fzm\":\"D37|Queen's Gambit Declined: Harrwitz Attack\",\"1hr3elyw08n\":\"D37|Queen's Gambit Declined: Harrwitz Attack\",\"h8h9dxr4ao\":\"D37|Queen's Gambit Declined: Harrwitz Attack, Fianchetto Defense\",\"wbff5iaf22\":\"D37|Queen's Gambit Declined: Harrwitz Attack, Main Line\",\"1xp03meylf4\":\"D37|Queen's Gambit Declined: Harrwitz Attack, Orthodox Defense\",\"1r2q1xz96a8\":\"D37|Queen's Gambit Declined: Harrwitz Attack, Two Knights Defense\",\"224sxp7yklf\":\"D37|Queen's Gambit Declined: Harrwitz Attack, Two Knights Defense, Blockade Line\",\"1zy8s8gp0wm\":\"D37|Queen's Gambit Declined: Knight Defense, Alekhine Gambit\",\"1ph0iv78g65\":\"D37|Queen's Gambit Declined: Miles Variation\",\"2b7d4bfs334\":\"D37|Queen's Gambit Declined: Three Knights Variation\",\"jh6z81qn1s\":\"D37|Queen's Gambit Declined: Three Knights Variation\",\"1pabefmdhgk\":\"D37|Queen's Gambit Declined: Three Knights, Vienna Variation\",\"2g76lama45v\":\"D37|Queen's Gambit Declined: Vienna Variation, Quiet Variation\",\"20kebny8msu\":\"D38|Queen's Gambit Declined: Ragozin Defense\",\"1r08ngkph7l\":\"D38|Queen's Gambit Declined: Ragozin Defense, Alekhine Variation\",\"lo25094wix\":\"D38|Queen's Gambit Declined: Westphalian Variation\",\"1q1tcqpkz2t\":\"D39|Queen's Gambit Declined: Ragozin Defense, Vienna Variation\",\"2fiyo9r4iz7\":\"D40|Queen's Gambit Declined: Semi-Tarrasch Defense\",\"8ydug1rzax\":\"D40|Queen's Gambit Declined: Semi-Tarrasch Defense\",\"2pyvn5zy7b\":\"D40|Queen's Gambit Declined: Semi-Tarrasch Defense, Levenfish Variation\",\"4m0uj5tlih\":\"D40|Queen's Gambit Declined: Semi-Tarrasch Defense, Pillsbury Variation\",\"1l1qjt0mybg\":\"D40|Queen's Gambit Declined: Semi-Tarrasch Defense, Symmetrical Variation\",\"k4a7gaser6\":\"D40|Queen's Gambit Declined: Semi-Tarrasch Defense, with e3\",\"e5h3lcbk68\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense\",\"dk4vimmjsp\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense\",\"zxa66yggvz\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense\",\"1r740xjesbv\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense\",\"1rt039o37mj\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense, Endgame Variation\",\"24sl5fi05hx\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense, Exchange Variation\",\"24ts6ctfhy5\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense, Exchange Variation\",\"1d2lvkoquyl\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense, Kmoch Variation\",\"20his19a1i6\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense, Pillsbury Variation\",\"17whktu4xw1\":\"D41|Queen's Gambit Declined: Semi-Tarrasch Defense, San Sebastian Variation\",\"1vlfbyuv1rq\":\"D42|Queen's Gambit Declined: Semi-Tarrasch Defense, Main Line\",\"18eglohey3d\":\"D43|Semi-Slav Defense\",\"1abke7hisj1\":\"D43|Semi-Slav Defense: Anti-Moscow Gambit\",\"1dobp2e86mr\":\"D43|Semi-Slav Defense: Hastings Variation\",\"2anijn1rsbh\":\"D43|Semi-Slav Defense: Moscow Variation\",\"2d2zn68tvht\":\"D44|Semi-Slav Defense Accepted\",\"1wbh5ch6mtw\":\"D44|Semi-Slav Defense: Botvinnik Variation\",\"1e7ypt4r7lj\":\"D44|Semi-Slav Defense: Botvinnik Variation\",\"ixugzwefpr\":\"D44|Semi-Slav Defense: Botvinnik Variation, Alatortsev System\",\"2b8yhn9c0qc\":\"D44|Semi-Slav Defense: Botvinnik Variation, Ekstrom Variation\",\"825fis8osi\":\"D44|Semi-Slav Defense: Botvinnik Variation, Lilienthal Variation\",\"21ieyqdoqq2\":\"D44|Semi-Slav Defense: Botvinnik Variation, Szabo Variation\",\"eirb1ynflf\":\"D45|Semi-Slav Defense: Accelerated Meran Variation\",\"2ftcbrfaz7a\":\"D45|Semi-Slav Defense: Main Line\",\"a6nghwuhg6\":\"D45|Semi-Slav Defense: Normal Variation\",\"tzon69izf9\":\"D45|Semi-Slav Defense: Normal Variation\",\"1wblb8n1lul\":\"D45|Semi-Slav Defense: Normal Variation\",\"15c0k2qr822\":\"D45|Semi-Slav Defense: Rubinstein System\",\"15d0uc955ce\":\"D45|Semi-Slav Defense: Stoltz Variation\",\"gw8rkum3nt\":\"D45|Semi-Slav Defense: Stoltz Variation\",\"173l0cydqp7\":\"D45|Semi-Slav Defense: Stoltz Variation\",\"27zjotnw5oq\":\"D45|Semi-Slav Defense: Stoltz Variation\",\"snymq7r5ce\":\"D45|Semi-Slav Defense: Stoltz Variation\",\"mmx4663a5i\":\"D45|Semi-Slav Defense: Stoltz Variation, Center Variation\",\"1xd2ofbl530\":\"D45|Semi-Slav Defense: Stoltz Variation, Center Variation, Mikhalchishin Line\",\"90r6ycsgkp\":\"D45|Semi-Slav Defense: Stoltz Variation, Shabalov Attack\",\"nn4griq1bb\":\"D45|Semi-Slav Defense: Stonewall Defense\",\"65kqijii63\":\"D46|Semi-Slav Defense: Bogoljubow Variation\",\"11qd4x8dmr8\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"5796tmxwbd\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"w8dq3vvt89\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"786a00lioz\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"22fpler2oh5\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"1c922gvglf4\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"1bnd3hplzx\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"15u68fuwhfo\":\"D46|Semi-Slav Defense: Chigorin Defense\",\"au1p84rhtz\":\"D46|Semi-Slav Defense: Main Line\",\"274mb3yj16v\":\"D46|Semi-Slav Defense: Main Line\",\"ex96xvwudd\":\"D46|Semi-Slav Defense: Romih Variation\",\"efanhn9hhw\":\"D47|Semi-Slav Defense: Meran Variation\",\"2y74z2bu4b\":\"D47|Semi-Slav Defense: Meran Variation, Lundin Variation\",\"acyc0mh1vw\":\"D47|Semi-Slav Defense: Meran Variation, Wade Variation\",\"2c6lh3tja93\":\"D47|Semi-Slav Defense: Meran Variation, Wade Variation, Kaidanov Gambit\",\"ojtgpfi9aa\":\"D47|Semi-Slav Defense: Meran Variation, Wade Variation, Larsen Variation\",\"fdvqm15urc\":\"D47|Semi-Slav Defense: Semi-Meran Variation\",\"1uv87u1uur\":\"D48|Semi-Slav Defense: Meran Variation\",\"2cz96bflxcq\":\"D48|Semi-Slav Defense: Meran Variation\",\"2aos25kdvdg\":\"D48|Semi-Slav Defense: Meran Variation\",\"13yoxynygff\":\"D48|Semi-Slav Defense: Meran Variation\",\"97bhiei85o\":\"D48|Semi-Slav Defense: Meran Variation\",\"10fd4gddarx\":\"D48|Semi-Slav Defense: Meran Variation, Old Variation\",\"1lddbdo3c0d\":\"D48|Semi-Slav Defense: Meran Variation, Pirc Variation\",\"4fdtte1l4v\":\"D48|Semi-Slav Defense: Meran Variation, Reynolds' Variation\",\"19ck4o8gd8y\":\"D49|Semi-Slav Defense: Meran Variation, Blumenfeld Variation\",\"1xy2u1lzs0b\":\"D49|Semi-Slav Defense: Meran Variation, Rabinovich Variation\",\"1pn1zljanyg\":\"D49|Semi-Slav Defense: Meran Variation, Rellstab Attack\",\"1i4l4qwvs40\":\"D49|Semi-Slav Defense: Meran Variation, Sozin Variation\",\"c4wum8js6d\":\"D49|Semi-Slav Defense: Meran Variation, Sozin Variation\",\"12shndb37qk\":\"D49|Semi-Slav Defense: Meran Variation, Stahlberg Variation\",\"1piigu1g8d0\":\"D50|Queen's Gambit Declined: Been-Koomen Variation\",\"isprppe2he\":\"D50|Queen's Gambit Declined: Modern Variation\",\"16sdbb1wym3\":\"D50|Queen's Gambit Declined: Pseudo-Tarrasch Variation\",\"1yyjv1dms6m\":\"D50|Queen's Gambit Declined: Pseudo-Tarrasch Variation, Canal Variation\",\"cekndx4gni\":\"D50|Queen's Gambit Declined: Pseudo-Tarrasch Variation, Primitive Pillsbury Variation\",\"20ibj6bcvgk\":\"D50|Queen's Gambit Declined: Semi-Tarrasch Defense, Krause Variation\",\"ut45e2go81\":\"D51|Queen's Gambit Declined: Alekhine Variation\",\"1tuzsx5yg1w\":\"D51|Queen's Gambit Declined: Capablanca Variation, Anti-Cambridge Springs Variation\",\"ft2b3ioim1\":\"D51|Queen's Gambit Declined: Manhattan Variation\",\"1ka8rmkuuql\":\"D51|Queen's Gambit Declined: Modern Variation, Knight Defense\",\"otfe8l8fdt\":\"D51|Queen's Gambit Declined: Modern Variation, Knight Defense\",\"1bmao9mfqm\":\"D51|Queen's Gambit Declined: Modern Variation, Knight Defense\",\"1dsgtvz8kzh\":\"D51|Queen's Gambit Declined: Rochlin Variation\",\"2f5nmpyt89r\":\"D52|Queen's Gambit Declined\",\"45biex6zft\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense\",\"a7a4z6qabm\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense\",\"23v51248yg4\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense, Argentine Variation\",\"1fvoiur0eoi\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense, Bogoljubow Variation\",\"18ooeka61pt\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense, Capablanca Variation\",\"2d9o1we78tx\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense, Rubinstein Variation\",\"1oucdb8f2gj\":\"D52|Queen's Gambit Declined: Cambridge Springs Defense, Yugoslav Variation\",\"zkufqpbqa2\":\"D53|Queen's Gambit Declined\",\"etnfnhpkab\":\"D53|Queen's Gambit Declined\",\"54aonv11js\":\"D53|Queen's Gambit Declined\",\"8kxjtrab50\":\"D53|Queen's Gambit Declined\",\"e7u3bmkrbo\":\"D53|Queen's Gambit Declined\",\"2cmyo0g2c1g\":\"D53|Queen's Gambit Declined\",\"ktf1gqwkzi\":\"D53|Queen's Gambit Declined: Lasker Defense\",\"2xiie8689i\":\"D53|Queen's Gambit Declined: Modern Variation, Heral Variation\",\"2eugxhma3kc\":\"D53|Queen's Gambit Declined: Uhlmann Variation\",\"48iheqgzdg\":\"D54|Queen's Gambit Declined: Neo-Orthodox Variation\",\"2a01fc9xfgs\":\"D55|Queen's Gambit Declined: Anti-Tartakower Variation\",\"g5te2sls95\":\"D55|Queen's Gambit Declined: Anti-Tartakower Variation, Petrosian Variation\",\"1ij9lpfacjj\":\"D55|Queen's Gambit Declined: Modern Variation, Normal Line\",\"1cr34acvgs3\":\"D55|Queen's Gambit Declined: Neo-Orthodox Variation\",\"242uzy6rd51\":\"D55|Queen's Gambit Declined: Neo-Orthodox Variation, Main Line\",\"2c81jq9wa1i\":\"D55|Queen's Gambit Declined: Pillsbury Attack\",\"wxgaau6y52\":\"D56|Queen's Gambit Declined\",\"po21ztach7\":\"D56|Queen's Gambit Declined: Lasker Defense\",\"1itca3pswlb\":\"D56|Queen's Gambit Declined: Lasker Defense\",\"1pdb2323ugc\":\"D56|Queen's Gambit Declined: Lasker Defense, Russian Variation\",\"2310q3q0bop\":\"D56|Queen's Gambit Declined: Lasker Defense, Teichmann Variation\",\"17fkd6eerhh\":\"D57|Queen's Gambit Declined: Lasker Defense, Bernstein Variation\",\"250yuu5ay7o\":\"D57|Queen's Gambit Declined: Lasker Defense, Bernstein Variation, Mar del Plata Gambit\",\"14kj27e593n\":\"D57|Queen's Gambit Declined: Lasker Defense, Main Line\",\"r50wajbidq\":\"D58|Queen's Gambit Declined: Tartakower Defense\",\"1qjnmxo2s62\":\"D58|Queen's Gambit Declined: Tartakower Defense, Exchange Variation\",\"288uvj9edwq\":\"D59|Queen's Gambit Declined: Tartakower Defense\",\"1x7dj6qmnyj\":\"D59|Queen's Gambit Declined: Tartakower Defense, Makogonov Exchange Variation\",\"fzzs2tra46\":\"D60|Queen's Gambit Declined: Orthodox Defense\",\"veqmim3ktr\":\"D60|Queen's Gambit Declined: Orthodox Defense, Botvinnik Variation\",\"8k2ubo8k3q\":\"D60|Queen's Gambit Declined: Orthodox Defense, Botvinnik Variation\",\"el2n27ygpa\":\"D60|Queen's Gambit Declined: Orthodox Defense, Rauzer Variation\",\"8m6j2yrdrq\":\"D61|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation\",\"16fjgzbvhr2\":\"D61|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation\",\"p5dlb954aj\":\"D61|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation\",\"1vl5kvmk31w\":\"D61|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation\",\"1l26e6t0boo\":\"D61|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation\",\"1v6ozcww94w\":\"D61|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation\",\"21jrvd0cu2q\":\"D62|Queen's Gambit Declined: Orthodox Defense, Rubinstein Variation, Flohr Line\",\"14p2b0poyyx\":\"D63|Queen's Gambit Declined: Orthodox Defense, Capablanca Variation\",\"1od84yrj0w0\":\"D63|Queen's Gambit Declined: Orthodox Defense, Henneberger Variation\",\"1kkb3je6iej\":\"D63|Queen's Gambit Declined: Orthodox Defense, Henneberger Variation\",\"297f3xflvta\":\"D63|Queen's Gambit Declined: Orthodox Defense, Henneberger Variation\",\"uyrq602cg\":\"D63|Queen's Gambit Declined: Orthodox Defense, Henneberger Variation\",\"1awhdg7rpct\":\"D63|Queen's Gambit Declined: Orthodox Defense, Main Line\",\"14chxtais02\":\"D63|Queen's Gambit Declined: Orthodox Defense, Main Line\",\"1kmlgq6a7ga\":\"D63|Queen's Gambit Declined: Orthodox Defense, Main Line\",\"16obwe5ie3u\":\"D63|Queen's Gambit Declined: Orthodox Defense, Pillsbury Variation\",\"6ictfdqit7\":\"D63|Queen's Gambit Declined: Orthodox Defense, Swiss, Carlsbad Variation\",\"1k1wpwuueio\":\"D64|Queen's Gambit Declined: Orthodox Defense, Rubinstein Attack\",\"1eb73agpcvi\":\"D64|Queen's Gambit Declined: Orthodox Defense, Rubinstein Attack\",\"14cgxwzvzt8\":\"D64|Queen's Gambit Declined: Orthodox Defense, Rubinstein Attack\",\"nq3fnvxzbv\":\"D64|Queen's Gambit Declined: Orthodox Defense, Rubinstein Attack\",\"13746v9jp3b\":\"D65|Queen's Gambit Declined: Orthodox Defense, Rubinstein Attack\",\"1wni0hpp5rw\":\"D65|Queen's Gambit Declined: Orthodox Defense, Rubinstein Attack\",\"1r6w5y8yxk5\":\"D66|Queen's Gambit Declined: Orthodox Defense, Bd3 Line\",\"2e17on89aif\":\"D66|Queen's Gambit Declined: Orthodox Defense, Bd3 Line\",\"1gyhit54mom\":\"D66|Queen's Gambit Declined: Orthodox Defense, Fianchetto Variation\",\"1xm3pmgru3v\":\"D67|Queen's Gambit Declined: Orthodox Defense, Alekhine Variation\",\"1lze1iu3z2j\":\"D67|Queen's Gambit Declined: Orthodox Defense, Bd3 Line\",\"26j5xnwq25s\":\"D67|Queen's Gambit Declined: Orthodox Defense, Capablanca System\",\"bb4myftl1w\":\"D67|Queen's Gambit Declined: Orthodox Defense, Janowski Variation\",\"2279jc72wow\":\"D67|Queen's Gambit Declined: Orthodox Defense, Main Line\",\"bu800f0tvp\":\"D68|Queen's Gambit Declined: Orthodox Defense, Classical Variation\",\"726dhfju05\":\"D68|Queen's Gambit Declined: Orthodox Defense, Classical Variation\",\"1hs2zo78704\":\"D68|Queen's Gambit Declined: Orthodox Defense, Classical Variation\",\"mubhayno1x\":\"D69|Queen's Gambit Declined: Orthodox Defense, Classical Variation\",\"1uor2u9afxr\":\"D70|Neo-Grünfeld Defense: Goglidze Attack\",\"bihziupa6u\":\"D70|Neo-Grünfeld Defense: with Nf3\",\"wj8sz09cv6\":\"D70|Neo-Grünfeld Defense: with g3\",\"1owqer4ep2h\":\"D71|Neo-Grünfeld Defense: Exchange Variation\",\"18qh38b6hlo\":\"D71|Neo-Grünfeld Defense: Exchange Variation\",\"20k9wpzquay\":\"D72|Neo-Grünfeld Defense: with g3\",\"og2ko7deg9\":\"D73|Neo-Grünfeld Defense: with g3\",\"29yrjd2ikeo\":\"D74|Neo-Grünfeld Defense: Delayed Exchange Variation\",\"1fbxw8vfg99\":\"D75|Neo-Grünfeld Defense: Delayed Exchange Variation\",\"269r6gmten7\":\"D75|Neo-Grünfeld Defense: Delayed Exchange Variation\",\"c7omlz5wh8\":\"D76|Neo-Grünfeld Defense: Delayed Exchange Variation\",\"yr6gbr2bb5\":\"D77|Neo-Grünfeld Defense: Classical Variation\",\"12mk1vmq6ta\":\"D77|Neo-Grünfeld Defense: Classical Variation, Modern Defense\",\"29tqrzx6ezu\":\"D77|Neo-Grünfeld Defense: Classical Variation, Polgar Variation\",\"vn9j46t9wh\":\"D78|Neo-Grünfeld Defense: Classical Variation, Original Defense\",\"7sdtz0ab1p\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"tgo13lkavu\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"1dmptq6lv3q\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"w5gf2fr4f2\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"2aiu607c9zb\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"3967vsk0sx\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"213sm6klvhn\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"233okx9zrwz\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"o242vsx7r1\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"skf3woax17\":\"D79|Neo-Grünfeld Defense: Ultra-Delayed Exchange Variation\",\"4m1o5kqr2s\":\"D80|Grünfeld Defense\",\"tjw7cahvkq\":\"D80|Grünfeld Defense: Gibbon Gambit\",\"1wl081ao5uy\":\"D80|Grünfeld Defense: Lundin Variation\",\"1wz1i6h2f3e\":\"D80|Grünfeld Defense: Lutikov Variation\",\"1ja8xqgpxrd\":\"D80|Grünfeld Defense: Lutikov Variation, Murrey Attack\",\"17dxuqvr95j\":\"D80|Grünfeld Defense: Stockholm Variation\",\"1rwdm0b7hsh\":\"D80|Grünfeld Defense: Zaitsev Gambit\",\"1j12zzgxpja\":\"D81|Grünfeld Defense: Russian Variation, Accelerated Variation\",\"xujmfxvmpq\":\"D82|Grünfeld Defense: Brinckmann Attack\",\"1uoc4bsl6ll\":\"D83|Grünfeld Defense: Brinckmann Attack, Grünfeld Gambit\",\"o6b25d4w2p\":\"D83|Grünfeld Defense: Brinckmann Attack, Grünfeld Gambit, Botvinnik Variation\",\"g54bd1shqi\":\"D83|Grünfeld Defense: Brinckmann Attack, Grünfeld Gambit, Capablanca Variation\",\"ue6r9e4c0i\":\"D83|Grünfeld Defense: Brinckmann Attack, Reshevsky Gambit\",\"mte4m5qicp\":\"D84|Grünfeld Defense: Brinckmann Attack, Grünfeld Gambit Accepted\",\"mfne8iaphf\":\"D85|Grünfeld Defense: Exchange Variation\",\"1rfyozcrit\":\"D85|Grünfeld Defense: Exchange Variation, Modern Exchange Variation\",\"ogzlmqzsrc\":\"D85|Grünfeld Defense: Exchange Variation, Modern Exchange Variation\",\"21btsjd46r8\":\"D85|Grünfeld Defense: Exchange Variation, Modern Exchange Variation\",\"1b38ho0l31r\":\"D85|Grünfeld Defense: Exchange Variation, Modern Exchange Variation, Kramnik's Line\",\"wxxu6ayubl\":\"D85|Grünfeld Defense: Exchange Variation, Modern Exchange Variation, Pawn Grab Line\",\"qdmad7hww0\":\"D85|Grünfeld Defense: Exchange Variation, Nadanian Attack\",\"ksym7dov5e\":\"D86|Grünfeld Defense: Exchange Variation, Classical Variation\",\"1llq2fs4ly7\":\"D86|Grünfeld Defense: Exchange Variation, Larsen Variation\",\"gr6s2uv0w2\":\"D86|Grünfeld Defense: Exchange Variation, Larsen Variation\",\"ih0cfb2bvg\":\"D86|Grünfeld Defense: Exchange Variation, Simagin's Improved Variation\",\"1invk5vkt6p\":\"D86|Grünfeld Defense: Exchange Variation, Simagin's Lesser Variation\",\"27sh49hfd4j\":\"D87|Grünfeld Defense: Exchange Variation, Seville Variation\",\"1abqoih38qh\":\"D87|Grünfeld Defense: Exchange Variation, Spassky Variation\",\"jf9xtu89oi\":\"D88|Grünfeld Defense: Exchange Variation, Spassky Variation\",\"skmqb1j7qj\":\"D89|Grünfeld Defense: Exchange Variation, Sokolsky Variation\",\"ust2v36d4j\":\"D89|Grünfeld Defense: Exchange Variation, Spassky Variation\",\"snl9kpf7jn\":\"D90|Grünfeld Defense: Flohr Variation\",\"28n53pkrd86\":\"D90|Grünfeld Defense: Three Knights Variation\",\"1bnosmn1vii\":\"D90|Grünfeld Defense: Three Knights Variation\",\"1f9v3iq62sr\":\"D91|Grünfeld Defense: Three Knights Variation, Petrosian System\",\"234d05bmvgx\":\"D92|Grünfeld Defense: Three Knights Variation, Hungarian Attack\",\"nxcdy0g78p\":\"D93|Grünfeld Defense: Three Knights Variation, Hungarian Variation\",\"10k3241wovt\":\"D94|Grünfeld Defense: Flohr Defense\",\"6xlkjkngsg\":\"D94|Grünfeld Defense: Makogonov Variation\",\"1pox8divr61\":\"D94|Grünfeld Defense: Opocensky Variation\",\"1gopbafg1q6\":\"D94|Grünfeld Defense: Smyslov Defense\",\"lh0g1y47kr\":\"D94|Grünfeld Defense: Three Knights Variation, Burille Variation\",\"2e1kwebmiwr\":\"D94|Grünfeld Defense: Three Knights Variation, Paris Variation\",\"11cqtbuacq2\":\"D95|Grünfeld Defense: Botvinnik Variation\",\"1vx65xmsngy\":\"D95|Grünfeld Defense: Pachman Variation\",\"kqy7tky4ux\":\"D95|Grünfeld Defense: Three Knights Variation, Vienna Variation\",\"advsvya51e\":\"D96|Grünfeld Defense: Russian Variation\",\"1zeog22c2h6\":\"D97|Grünfeld Defense: Russian Variation\",\"okzurtqcnv\":\"D97|Grünfeld Defense: Russian Variation, Byrne Variation\",\"ifk1lo2rh2\":\"D97|Grünfeld Defense: Russian Variation, Hungarian Variation\",\"248iyu51hdu\":\"D97|Grünfeld Defense: Russian Variation, Levenfish Variation\",\"qt1h43rmmn\":\"D97|Grünfeld Defense: Russian Variation, Prins Variation\",\"1adab8fw0x6\":\"D97|Grünfeld Defense: Russian Variation, Szabo Variation\",\"tvno5zzadc\":\"D98|Grünfeld Defense: Russian Variation, Keres Variation\",\"1xoumo6xx4j\":\"D98|Grünfeld Defense: Russian Variation, Smyslov Variation\",\"4vrx6o5u3w\":\"D99|Grünfeld Defense: Russian Variation, Smyslov Variation\",\"15mk4ym4t2k\":\"D99|Grünfeld Defense: Russian Variation, Yugoslav Variation\",\"163id5cyjb3\":\"E00|Catalan Opening\",\"gm5f6cj09l\":\"E00|Catalan Opening\",\"1kdps6blqu5\":\"E00|Catalan Opening: Hungarian Gambit\",\"teb9f8yxbj\":\"E00|Indian Defense\",\"1dbs1ob5752\":\"E00|Indian Defense: Devin Gambit\",\"ftib30x1l3\":\"E00|Indian Defense: Seirawan Attack\",\"25f4ofe65q3\":\"E01|Catalan Opening: Open Defense\",\"1n6fs58ng9z\":\"E01|Catalan Opening: Tarrasch Defense\",\"1i2118u1cgd\":\"E02|Catalan Opening: Open Defense\",\"28x67are66n\":\"E03|Catalan Opening: Open Defense\",\"2debgc6pitk\":\"E03|Catalan Opening: Open Defense, Alekhine Variation\",\"18uaswgsz3o\":\"E04|Catalan Opening: Open Defense\",\"23i8y6pp5s4\":\"E04|Catalan Opening: Open Defense\",\"29wk9g46rf\":\"E04|Catalan Opening: Open Defense, Modern Sharp Variation\",\"166w5uyklkm\":\"E05|Catalan Opening: Open Defense, Classical Line\",\"21nacrum8es\":\"E05|Catalan Opening: Open Defense, Classical Line\",\"1rxi86ptv2i\":\"E06|Catalan Opening: Closed\",\"19p96m2j2j\":\"E06|Catalan Opening: Closed\",\"vvxmgkcbza\":\"E06|Catalan Opening: Closed\",\"1wmh3kual5n\":\"E06|Catalan Opening: Closed\",\"16bho6u0c0m\":\"E07|Catalan Opening: Closed\",\"2cg4s0zff6z\":\"E07|Catalan Opening: Closed, Botvinnik Variation\",\"1aho6ixc0bh\":\"E08|Catalan Opening: Closed\",\"1z3hw8ui1h0\":\"E08|Catalan Opening: Closed\",\"vqxyerq7m7\":\"E08|Catalan Opening: Closed\",\"11z8erxyq9e\":\"E08|Catalan Opening: Closed\",\"242047wjp54\":\"E08|Catalan Opening: Closed\",\"1kda3udwdo\":\"E08|Catalan Opening: Closed, Spassky Gambit\",\"28nw0assenw\":\"E08|Catalan Opening: Closed, Zagoryansky Variation\",\"16z12cpvgv4\":\"E09|Catalan Opening: Closed Variation, Rabinovich Variation\",\"11lllpv880b\":\"E09|Catalan Opening: Closed Variation, Traditional Variation\",\"1hnu65k6abx\":\"E09|Catalan Opening: Closed, Main Line\",\"1odab8l8d84\":\"E09|Catalan Opening: Closed, Main Line\",\"29ye5l1rxtz\":\"E09|Catalan Opening: Closed, Main Line\",\"voxjqjlfom\":\"E09|Catalan Opening: Closed, Sokolsky Variation\",\"14zsb0k67g6\":\"E10|Blumenfeld Countergambit\",\"2dt3xr8gn1l\":\"E10|Blumenfeld Countergambit Accepted\",\"1vhu390r8y3\":\"E10|Blumenfeld Countergambit: Duz-Khotimirsky Variation\",\"1pjvw0m6gd4\":\"E10|Blumenfeld Countergambit: Spielmann Variation\",\"1rg9mdcb5dk\":\"E10|Indian Defense: Anti-Nimzo-Indian\",\"1v4stgxol1u\":\"E10|Indian Defense: Dzindzi-Indian Defense\",\"1lgqabdn8td\":\"E10|Indian Defense: Döry Indian\",\"1zv65jb9d8b\":\"E11|Bogo-Indian Defense\",\"2639vf80vf2\":\"E11|Bogo-Indian Defense: Exchange Variation\",\"ectjdj4br\":\"E11|Bogo-Indian Defense: Grünfeld Variation\",\"fdrwpwiohd\":\"E11|Bogo-Indian Defense: Haiti Variation\",\"175v4twtnkq\":\"E11|Bogo-Indian Defense: Monticelli Trap\",\"kqs4kwsixi\":\"E11|Bogo-Indian Defense: New England Variation\",\"k4vy8v9jvm\":\"E11|Bogo-Indian Defense: Nimzowitsch Variation\",\"1eh1u3l3sli\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"pn5lngeyr1\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"13rmiwblsy3\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"2fedj4of4el\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"21ywl398m2q\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"2eft10w5va9\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"1m8n32thqx1\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"1m4ss8gxopn\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"e9yoz366mh\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"xkosx34w68\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"g1zosxaamz\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"1cikxv81dwi\":\"E11|Bogo-Indian Defense: Retreat Variation\",\"l82p6vnwbb\":\"E11|Bogo-Indian Defense: Vitolins Variation\",\"76itzo7n18\":\"E11|Bogo-Indian Defense: Wade-Smyslov Variation\",\"1d1fahwn32f\":\"E12|Queen's Indian Defense\",\"nzrl9ajbdm\":\"E12|Queen's Indian Defense: Kasparov Variation\",\"h1oatlep60\":\"E12|Queen's Indian Defense: Kasparov Variation, Botvinnik Attack\",\"fxnfw14yel\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation\",\"1ervgxjgikj\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Andersson Variation\",\"1jueyfcnv7k\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Classical Variation\",\"1cgm7wyvo3l\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Hedgehog Variation\",\"19g7m3pt8ht\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Kasparov Attack\",\"1q2z9e3ue1q\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Main Line\",\"261vvvot3ik\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Marco Defense\",\"4f8wn89flw\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Modern Variation\",\"9r3s97wqvu\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Petrosian Attack\",\"28xlszbe315\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Polovodin Gambit\",\"25y33hb74cw\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Rashkovsky Attack\",\"x4k7f8hsua\":\"E12|Queen's Indian Defense: Kasparov-Petrosian Variation, Romanishin Attack\",\"1ez18vtrnb2\":\"E12|Queen's Indian Defense: Miles Variation\",\"2ce3glgu58y\":\"E12|Queen's Indian Defense: Petrosian Variation\",\"1x5gay9aenl\":\"E12|Queen's Indian Defense: Petrosian Variation, Farago Defense\",\"s1a2t8h1fq\":\"E13|Queen's Indian Defense: Kasparov Variation\",\"183ihud81jq\":\"E14|Queen's Indian Defense, with e3\",\"1wyxj7saw1t\":\"E14|Queen's Indian Defense, with e3\",\"4cbp9kumvy\":\"E14|Queen's Indian Defense, with e3\",\"kefq52o05s\":\"E14|Queen's Indian Defense, with e3\",\"1seuqzt2iei\":\"E14|Queen's Indian Defense, with e3\",\"178oegifrab\":\"E14|Queen's Indian Defense, with e3\",\"2br3jvh80i8\":\"E14|Queen's Indian Defense, with e3\",\"2gn9lpvg7vc\":\"E14|Queen's Indian Defense, with e3\",\"1b19k452qlj\":\"E14|Queen's Indian Defense, with e3\",\"s1t8vxlw8w\":\"E14|Queen's Indian Defense, with e3\",\"giyaqnhuwg\":\"E14|Queen's Indian Defense, with e3\",\"9f52imtcpa\":\"E14|Queen's Indian Defense, with e3\",\"wfz6sg4ip2\":\"E14|Queen's Indian Defense, with e3\",\"14o8pt3fi3e\":\"E14|Queen's Indian Defense, with e3\",\"iyipit3b3z\":\"E14|Queen's Indian Defense, with e3, Bb4+ Line\",\"1d2mlzdukzw\":\"E14|Queen's Indian Defense: Averbakh Variation\",\"2glbdhi8hqo\":\"E14|Queen's Indian Defense: Spassky System\",\"1p9g7m8tiuk\":\"E14|Queen's Indian Defense: Spassky System\",\"15m7njy2qoz\":\"E14|Queen's Indian Defense: Spassky System\",\"237pafw4955\":\"E14|Queen's Indian Defense: Spassky System\",\"1iw5hhev1vs\":\"E14|Queen's Indian Defense: Spassky System3\",\"pmgp8x9pqj\":\"E14|Queen's Indian Defense: Spassky System3\",\"1796lp68qi8\":\"E15|Queen's Indian Defense: Buerger Variation\",\"1sgp353ysoq\":\"E15|Queen's Indian Defense: Fianchetto Variation\",\"27o6x5bxu3l\":\"E15|Queen's Indian Defense: Fianchetto Variation, Check Variation\",\"20bfdt7jtr6\":\"E15|Queen's Indian Defense: Fianchetto Variation, Check Variation, Intermezzo Line\",\"149ugml5ye5\":\"E15|Queen's Indian Defense: Fianchetto Variation, Check Variation, Modern Line\",\"wz1h0juzlg\":\"E15|Queen's Indian Defense: Fianchetto Variation, Nimzowitsch Variation\",\"1k1ller1uvo\":\"E15|Queen's Indian Defense: Fianchetto Variation, Nimzowitsch Variation, Nimzowitsch Attack\",\"1gajxbxw6vf\":\"E15|Queen's Indian Defense: Fianchetto Variation, Nimzowitsch Variation, Quiet Line\",\"ly0c09kfou\":\"E15|Queen's Indian Defense: Fianchetto Variation, Nimzowitsch Variation, Timman's Line\",\"1b0t5uf5zh0\":\"E15|Queen's Indian Defense: Fianchetto Variation, Rubinstein Variation\",\"1t2b6l5ugjp\":\"E15|Queen's Indian Defense: Fianchetto Variation, Sämisch Variation\",\"x9sjs7c84n\":\"E15|Queen's Indian Defense: Fianchetto Variation, Traditional Line\",\"1au1w2xxugf\":\"E16|Queen's Indian Defense: Capablanca Variation\",\"6cvx70kadp\":\"E16|Queen's Indian Defense: Capablanca Variation\",\"1ynzf9olg4\":\"E16|Queen's Indian Defense: Capablanca Variation\",\"6q3to61eq6\":\"E16|Queen's Indian Defense: Capablanca Variation\",\"a0i5bwx2ix\":\"E16|Queen's Indian Defense: Riumin Variation\",\"1hztkvhto0b\":\"E16|Queen's Indian Defense: Riumin Variation\",\"1eecxhrgwnh\":\"E16|Queen's Indian Defense: Riumin Variation\",\"7ijbzp641k\":\"E16|Queen's Indian Defense: Yates Variation\",\"1qy1dqmgjfd\":\"E17|Queen's Indian Defense: Anti-Queen's Indian System\",\"4rv3tso0q0\":\"E17|Queen's Indian Defense: Classical Variation\",\"1kbvfe3maio\":\"E17|Queen's Indian Defense: Classical Variation, Polugaevsky Gambit\",\"1t001ktm21a\":\"E17|Queen's Indian Defense: Classical Variation, Taimanov Gambit\",\"17i2a18s5mu\":\"E17|Queen's Indian Defense: Euwe Variation\",\"edxobcswd1\":\"E17|Queen's Indian Defense: Fianchetto Variation, Kramnik Variation\",\"vleap0k08x\":\"E17|Queen's Indian Defense: Opocensky Variation\",\"x7ex3dk6et\":\"E17|Queen's Indian Defense: Traditional Variation\",\"ieq264ew01\":\"E18|Queen's Indian Defense: Classical Variation, Tiviakov Defense\",\"3nenye7r1n\":\"E18|Queen's Indian Defense: Classical Variation, Traditional Variation\",\"17p6qt0m162\":\"E18|Queen's Indian Defense: Classical Variation, Traditional Variation, Nimzowitsch Line\",\"blgnx8ck1k\":\"E19|Queen's Indian Defense: Classical Variation, Traditional Variation, Main Line\",\"8xnh8zuby9\":\"E20|Nimzo-Indian Defense\",\"1zyuv1nssrt\":\"E20|Nimzo-Indian Defense: Dilworth Gambit\",\"sbgazq2bgg\":\"E20|Nimzo-Indian Defense: Kmoch Variation\",\"c3h2gd9kzt\":\"E20|Nimzo-Indian Defense: Mikenas Attack\",\"24mpijbrn6g\":\"E20|Nimzo-Indian Defense: Romanishin Variation\",\"1i92goyojua\":\"E20|Nimzo-Indian Defense: Romanishin Variation\",\"1efc9m58wq1\":\"E20|Nimzo-Indian Defense: Romanishin Variation, English Hybrid\",\"sruxy8ae46\":\"E21|Nimzo-Indian Defense: Three Knights Variation\",\"x8dm3kbhu3\":\"E21|Nimzo-Indian Defense: Three Knights Variation, Euwe Variation\",\"86gduosmhx\":\"E21|Nimzo-Indian Defense: Three Knights Variation, Korchnoi Variation\",\"1jszubo8sm3\":\"E21|Nimzo-Indian Defense: Three Knights Variation, Shocron Gambit\",\"235wnxnfhu2\":\"E22|Nimzo-Indian Defense: Spielmann Variation\",\"2fozzz5ksgj\":\"E23|Nimzo-Indian Defense: Spielmann Variation, Carlsbad Variation\",\"20myxk3d728\":\"E23|Nimzo-Indian Defense: Spielmann Variation, Romanovsky Gambit\",\"1d38vvs1pgj\":\"E23|Nimzo-Indian Defense: Spielmann Variation, Stahlberg Variation\",\"2e2bn37mcb1\":\"E23|Nimzo-Indian Defense: Spielmann Variation, Stahlberg Variation\",\"26mr4na722n\":\"E24|Nimzo-Indian Defense: Sämisch Variation\",\"26u2av2c3ec\":\"E24|Nimzo-Indian Defense: Sämisch Variation, Botvinnik Variation\",\"1yyrh2pt5q6\":\"E25|Nimzo-Indian Defense: Sämisch Variation\",\"15t63abm2fr\":\"E25|Nimzo-Indian Defense: Sämisch Variation, Keres Variation\",\"10zfku1gsjb\":\"E25|Nimzo-Indian Defense: Sämisch Variation, Romanovsky Variation\",\"2feo18cpzmn\":\"E26|Nimzo-Indian Defense: Sämisch Variation\",\"1u1vn3yp44o\":\"E26|Nimzo-Indian Defense: Sämisch Variation, O'Kelly Variation\",\"nmqua13wgo\":\"E27|Nimzo-Indian Defense: Sämisch Variation\",\"4qubyddeb1\":\"E28|Nimzo-Indian Defense: Sämisch Variation\",\"22mxcel21m0\":\"E29|Nimzo-Indian Defense: Sämisch Variation\",\"1k60o04vb93\":\"E29|Nimzo-Indian Defense: Sämisch Variation, Capablanca Variation\",\"193trxg8p95\":\"E30|Nimzo-Indian Defense: Leningrad Variation\",\"233lnxto788\":\"E30|Nimzo-Indian Defense: Leningrad Variation, Averbakh Gambit\",\"2r3y4u1vg2\":\"E31|Nimzo-Indian Defense: Leningrad Variation, Benoni Defense\",\"1nlqjd2fh0n\":\"E32|Nimzo-Indian Defense: Classical Variation\",\"861qjj8kh0\":\"E32|Nimzo-Indian Defense: Classical Variation, Keres Defense\",\"136c4wpfyxa\":\"E32|Nimzo-Indian Defense: Classical Variation, Vitolins-Adorjan Gambit\",\"qrafvms546\":\"E33|Nimzo-Indian Defense: Classical Variation, Milner-Barry Variation\",\"25mu1xd54dy\":\"E33|Nimzo-Indian Defense: Classical Variation, Zurich Variation\",\"24dnf4j7pdj\":\"E33|Nimzo-Indian Defense: Classical Variation, Zurich Variation\",\"xiocigu1wn\":\"E33|Nimzo-Indian Defense: Classical Variation, Zurich Variation\",\"q9dwwnh114\":\"E33|Nimzo-Indian Defense: Classical Variation, Zurich Variation\",\"2505gr0mt56\":\"E34|Nimzo-Indian Defense: Classical Variation, Belyavsky Gambit\",\"1lwut9v4p4l\":\"E34|Nimzo-Indian Defense: Classical Variation, Noa Variation\",\"24ikr3ag97i\":\"E35|Nimzo-Indian Defense: Classical Variation, Noa Variation\",\"26toe2slx4x\":\"E36|Nimzo-Indian Defense: Classical Variation, Noa Variation\",\"1lcws1owuto\":\"E36|Nimzo-Indian Defense: Classical Variation, Noa Variation, Botvinnik Variation\",\"ltr1beckk8\":\"E36|Nimzo-Indian Defense: Classical Variation, Noa Variation, Main Line\",\"125tlmhz2wh\":\"E36|Nimzo-Indian Defense: Classical Variation, Romanishin Gambit\",\"264jrbekyda\":\"E37|Nimzo-Indian Defense: Classical Variation, Modern Variation\",\"1qrtw86e94f\":\"E37|Nimzo-Indian Defense: Classical Variation, Noa Variation\",\"1zqfxh8fzf3\":\"E37|Nimzo-Indian Defense: Classical Variation, Noa Variation, San Remo Variation\",\"1sruywkg3io\":\"E38|Nimzo-Indian Defense: Classical Variation, Berlin Variation\",\"13d88gijyh5\":\"E38|Nimzo-Indian Defense: Classical Variation, Berlin Variation\",\"1hntmsv6x76\":\"E38|Nimzo-Indian Defense: Classical Variation, Berlin Variation, Steiner Variation\",\"1tc89ts7wt5\":\"E39|Nimzo-Indian Defense: Classical Variation, Berlin Variation, Macieja System\",\"23d8ryxlcvt\":\"E39|Nimzo-Indian Defense: Classical Variation, Berlin Variation, Pirc Variation\",\"1z98cy1zru\":\"E40|Nimzo-Indian Defense: Rubinstein System\",\"2cjjpt7t0j3\":\"E40|Nimzo-Indian Defense: Rubinstein System, Taimanov Variation\",\"1svgy7mcgt4\":\"E41|Nimzo-Indian Defense: Rubinstein System\",\"1zsobkh4x1h\":\"E41|Nimzo-Indian Defense: Rubinstein System, Hübner Variation\",\"13xwp0wpppc\":\"E41|Nimzo-Indian Defense: Rubinstein System, Hübner Variation\",\"1pmanpb4nqp\":\"E42|Nimzo-Indian Defense: Rubinstein System, Rubinstein Variation\",\"1d5elgvf77j\":\"E42|Nimzo-Indian Defense: Rubinstein System, Rubinstein Variation, Main Line\",\"vhnh32z2cd\":\"E42|Nimzo-Indian Defense: Rubinstein System, Rubinstein Variation, Sherbakov Attack\",\"2cjzpttdblv\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"1fnh1q5k430\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"oqqn6p9mlb\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"17t2uqe5lgp\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"57grzg3y6l\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"1z1bmuyjktp\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"2ffb0tohify\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"15btd8jsu4k\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"13evfstqb2u\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"wq1ddhdnat\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"4ed39i790c\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation\",\"2cod32wu7ir\":\"E43|Nimzo-Indian Defense: St. Petersburg Variation, with Ne4\",\"bf6os7mkgv\":\"E44|Nimzo-Indian Defense: St. Petersburg Variation\",\"1nw2t2lz6pv\":\"E44|Nimzo-Indian Defense: St. Petersburg Variation, American Variation\",\"2sk0y4yqpa\":\"E44|Nimzo-Indian Defense: St. Petersburg Variation, Romanishin-Psakhis Variation\",\"hwyzb8vlt\":\"E45|Nimzo-Indian Defense: St. Petersburg Variation, Fischer Variation\",\"gsp4oo3v0c\":\"E46|Nimzo-Indian Defense: Normal Variation\",\"m1e26nu387\":\"E46|Nimzo-Indian Defense: Reshevsky Variation\",\"pq6d53vx7c\":\"E46|Nimzo-Indian Defense: Simagin Variation\",\"14yicbgj04t\":\"E47|Nimzo-Indian Defense: Normal Variation\",\"275bnzjx6lf\":\"E48|Nimzo-Indian Defense: Normal Variation, Classical Defense\",\"1rqxykh75rs\":\"E48|Nimzo-Indian Defense: Ragozin Defense\",\"29ss6l193g6\":\"E49|Nimzo-Indian Defense: Normal Variation, Botvinnik System\",\"8lmll6t645\":\"E50|Nimzo-Indian Defense\",\"25h6r2rrtyv\":\"E51|Nimzo-Indian Defense: Normal Variation, Ragozin Variation\",\"euk0romad\":\"E51|Nimzo-Indian Defense: Normal Variation, Ragozin Variation\",\"3nklbain0b\":\"E51|Nimzo-Indian Defense: Normal Variation, Ragozin Variation\",\"25yyuqw041h\":\"E51|Nimzo-Indian Defense: Normal Variation, Sämisch Deferred\",\"28hwmnw0iyf\":\"E51|Nimzo-Indian Defense: Ragozin Variation\",\"1k6l7ndgr4g\":\"E52|Nimzo-Indian Defense: Normal Variation, Schlechter Defense\",\"9z4jbyta61\":\"E52|Nimzo-Indian Defense: Normal Variation, Schlechter Defense\",\"oek7qfmxge\":\"E53|Nimzo-Indian Defense: Normal Variation, Gligoric System\",\"20trdxasfpv\":\"E53|Nimzo-Indian Defense: Normal Variation, Gligoric System\",\"29tj4p45s2t\":\"E53|Nimzo-Indian Defense: Normal Variation, Gligoric System, Keres Variation\",\"1a8z6dyvsh1\":\"E54|Nimzo-Indian Defense: Normal Variation, Gligoric System, Exchange Variation\",\"3w5it56aiw\":\"E54|Nimzo-Indian Defense: Normal Variation, Gligoric System, Exchange Variation\",\"20n0z8a2x5b\":\"E54|Nimzo-Indian Defense: Normal Variation, Gligoric System, Smyslov Variation\",\"2e39k6si490\":\"E55|Nimzo-Indian Defense: Normal Variation, Gligoric System, Bronstein Variation\",\"1uk3hyq5jtj\":\"E56|Nimzo-Indian Defense: Normal Variation, Gligoric System, Bernstein Defense\",\"1r3z3bzqlss\":\"E57|Nimzo-Indian Defense: Normal Variation, Gligoric System, Bernstein Defense\",\"17ecbr4qb37\":\"E58|Nimzo-Indian Defense: Normal Variation, Bernstein Defense, Exchange Line\",\"1tchsyir64\":\"E59|Nimzo-Indian Defense: Normal Variation, Bernstein Defense\",\"1mcuu174oz\":\"E59|Nimzo-Indian Defense: Normal Variation, Bernstein Defense\",\"2278of9botx\":\"E60|Grünfeld Defense: Counterthrust Variation\",\"1r27h2x389v\":\"E60|Indian Defense: Anti-Grünfeld, Adorjan Gambit\",\"cm4ujmv13p\":\"E60|Indian Defense: Anti-Grünfeld, Advance Variation\",\"19jw40riikk\":\"E60|Indian Defense: Anti-Grünfeld, Alekhine Variation\",\"1iblo0334ts\":\"E60|Indian Defense: Anti-Grünfeld, Alekhine Variation, Leko Gambit\",\"2apgrc1jeg6\":\"E60|Indian Defense: Anti-Grünfeld, Basman-Williams Attack\",\"17erena49mx\":\"E60|Indian Defense: West Indian Defense\",\"qxp4b43r4j\":\"E60|King's Indian Defense: Fianchetto Variation\",\"1rv0t0xiv5l\":\"E60|King's Indian Defense: Fianchetto Variation, Immediate Fianchetto\",\"112yzv7naem\":\"E60|King's Indian Defense: Normal Variation, King's Knight Variation\",\"1qb78i2tn7j\":\"E60|King's Indian Defense: Santasiere Variation\",\"18gfro8aqfq\":\"E60|King's Indian Defense: Semi-Classical Variation, Benoni Variation\",\"1q6nq2m8ssv\":\"E60|King's Indian Defense: Semi-Classical Variation, Hollywood Variation\",\"13fq0nw7lzx\":\"E60|Queen's Pawn, Mengarini Attack\",\"hraqflljcu\":\"E61|King's Indian Defense\",\"1omonfp48ds\":\"E61|King's Indian Defense: Fianchetto Variation, Benjamin Defense\",\"var6pxik1v\":\"E61|King's Indian Defense: Semi-Classical Variation\",\"1v5up0z5pr1\":\"E61|King's Indian Defense: Semi-Classical Variation, Exchange Variation\",\"1ofjsqz5xfq\":\"E61|King's Indian Defense: Semi-Classical Variation, Queenside Storm Line\",\"2baxs7n185f\":\"E61|King's Indian Defense: Smyslov Variation\",\"lrqhr9cigs\":\"E62|King's Indian Defense: Fianchetto Variation, Carlsbad Variation\",\"9f8u2fvq1b\":\"E62|King's Indian Defense: Fianchetto Variation, Delayed Fianchetto\",\"vfdjly0000\":\"E62|King's Indian Defense: Fianchetto Variation, Kavalek Defense\",\"hrton814ro\":\"E62|King's Indian Defense: Fianchetto Variation, Larsen Defense\",\"etqgmy8qxh\":\"E62|King's Indian Defense: Fianchetto Variation, Lesser Simagin (Spassky)\",\"24qn969tzgk\":\"E62|King's Indian Defense: Fianchetto Variation, Simagin Variation\",\"1vxs11krhby\":\"E62|King's Indian Defense: Fianchetto Variation, Uhlmann-Szabo System\",\"2aj489d9afu\":\"E63|King's Indian Defense: Fianchetto Variation, Panno Variation\",\"1qkzvxxm3zs\":\"E63|King's Indian Defense: Fianchetto Variation, Panno Variation, Blockade Line\",\"1ga6hgmfjvl\":\"E63|King's Indian Defense: Fianchetto Variation, Panno Variation, Donner Line\",\"7hczmnzr84\":\"E63|King's Indian Defense: Fianchetto Variation, Panno Variation, Korchnoi Line\",\"1zyean95ig4\":\"E64|King's Indian Defense: Fianchetto Variation, Double Fianchetto Attack\",\"s17npjiq6l\":\"E64|King's Indian Defense: Fianchetto Variation, Hungarian Variation\",\"bbwchsoo5c\":\"E64|King's Indian Defense: Fianchetto Variation, Pterodactyl Variation\",\"h33u81dqu2\":\"E64|King's Indian Defense: Fianchetto Variation, Yugoslav System\",\"16h399ios7o\":\"E64|King's Indian Defense: Fianchetto Variation, Yugoslav Variation, Rare Line\",\"27amognruvg\":\"E65|King's Indian Defense: Fianchetto Variation, Yugoslav Variation\",\"216t4eegne7\":\"E65|King's Indian Defense: Fianchetto Variation, Yugoslav Variation, Exchange Line\",\"1lfbqoh8t1m\":\"E66|King's Indian Defense: Fianchetto Variation, Yugoslav Variation, Advance Line\",\"1966ddb74l8\":\"E67|King's Indian Defense: Fianchetto Variation, Classical Fianchetto\",\"1m0kzl920yt\":\"E67|King's Indian Defense: Fianchetto Variation, Debrecen Defense\",\"10gtndwu15b\":\"E68|King's Indian Defense: Fianchetto Variation, Classical Variation\",\"hqklcqgj7h\":\"E68|King's Indian Defense: Fianchetto Variation, Long Variation\",\"vei6570e6o\":\"E69|King's Indian Defense: Fianchetto Variation, Classical Main Line\",\"1b469p1hdfx\":\"E70|King's Indian Defense: Accelerated Averbakh Variation\",\"1cg438iyl0\":\"E70|King's Indian Defense: Kramer Variation\",\"18fk4lknn00\":\"E70|King's Indian Defense: Normal Variation\",\"1dep815a6iz\":\"E70|King's Indian Defense: Normal Variation\",\"13u7fo18zw0\":\"E71|King's Indian Defense: Karpov System\",\"1j5o0x943od\":\"E71|King's Indian Defense: Makogonov Variation\",\"hpzdtd4k2b\":\"E72|King's Indian Defense: Normal Variation, Deferred Fianchetto\",\"kngng85tvx\":\"E72|King's Indian Defense: Pomar System\",\"1yeswi8bs1e\":\"E73|King's Indian Defense: Averbakh Variation\",\"sz4fqofs2f\":\"E73|King's Indian Defense: Averbakh Variation, Flexible Defense\",\"1hvrwoq1044\":\"E73|King's Indian Defense: Averbakh Variation, Geller Defense\",\"ogkuvqd24m\":\"E73|King's Indian Defense: Averbakh Variation, Modern Defense\",\"1wxipn9ozuv\":\"E73|King's Indian Defense: Averbakh Variation, Modern Defense, Burgess Line\",\"1vfg2m0nbeo\":\"E73|King's Indian Defense: Averbakh Variation, Nc6 Defense\",\"3iyo5ch8cp\":\"E73|King's Indian Defense: Averbakh Variation, Spanish Defense\",\"lmfuuakb6p\":\"E73|King's Indian Defense: Normal Variation, Standard Development\",\"ooesd0anac\":\"E73|King's Indian Defense: Semi-Averbakh System\",\"1l1d2r0nryb\":\"E74|King's Indian Defense: Averbakh Variation, Benoni Defense\",\"26i3pyuxo5t\":\"E74|King's Indian Defense: Averbakh Variation, Benoni Defense, Advance Variation\",\"1hggbt3m45w\":\"E74|King's Indian Defense: Averbakh Variation, Benoni Defense, Exchange Variation\",\"tsjrnaz3o9\":\"E75|King's Indian Defense: Averbakh Variation, Main Line\",\"1tc4s0ybtie\":\"E76|King's Indian Defense: Four Pawns Attack\",\"1xgxmryjcj5\":\"E76|King's Indian Defense: Four Pawns Attack, Dynamic Attack\",\"vo057vzc6v\":\"E76|King's Indian Defense: Four Pawns Attack, Modern Defense\",\"238c4tcdj11\":\"E77|King's Indian Defense: Four Pawns Attack\",\"26zza2l3g8w\":\"E77|King's Indian Defense: Four Pawns Attack, Florentine Gambit\",\"2mo72kl99w\":\"E77|King's Indian Defense: Four Pawns Attack, Normal Attack\",\"24w4q04u8e0\":\"E77|King's Indian Defense: Six Pawns Attack\",\"b3pmnwoosi\":\"E78|King's Indian Defense: Four Pawns Attack, Fluid Attack\",\"1909kpho3hm\":\"E79|King's Indian Defense: Four Pawns Attack, Exchange Variation\",\"1gj0nyudbl0\":\"E80|King's Indian Defense: Sämisch Variation\",\"6xp75tnu5s\":\"E81|King's Indian Defense: Steiner Attack\",\"167fg0xh7qz\":\"E81|King's Indian Defense: Steiner Attack\",\"13rs1tla0bk\":\"E81|King's Indian Defense: Steiner Attack\",\"ed0xn9c3i4\":\"E81|King's Indian Defense: Steiner Attack\",\"1bz6ft4sifz\":\"E81|King's Indian Defense: Sämisch Variation, Bobotsov-Korchnoi-Petrosian Variation\",\"hy4xoufs9s\":\"E81|King's Indian Defense: Sämisch Variation, Byrne Defense\",\"h9smogdd96\":\"E81|King's Indian Defense: Sämisch Variation, Normal Defense\",\"242w7q9xus9\":\"E81|King's Indian Defense: Sämisch Variation, Sämisch Gambit\",\"1rdckrzp3tl\":\"E81|King's Indian Defense: Sämisch Variation, Sämisch Gambit Accepted\",\"1sqpnybh0kx\":\"E82|King's Indian Defense: Sämisch Variation, Double Fianchetto\",\"15sajxfnz05\":\"E83|King's Indian Defense: Sämisch Variation, Panno Formation\",\"1txtthvq9cp\":\"E83|King's Indian Defense: Sämisch Variation, Ruban Variation\",\"j1elap26ij\":\"E83|King's Indian Defense: Sämisch Variation, Yates Defense\",\"23eldd7jyft\":\"E84|King's Indian Defense: Sämisch Variation, Panno Main Line\",\"2go8yrxkcof\":\"E85|King's Indian Defense: Sämisch Variation, Orthodox Variation\",\"4i4bwzt0jb\":\"E86|King's Indian Defense: Sämisch Variation\",\"o5sndiz226\":\"E87|King's Indian Defense: Sämisch Variation, Bronstein Defense\",\"1eg662v0yca\":\"E87|King's Indian Defense: Sämisch Variation, Closed Variation\",\"fvkpmqbkdx\":\"E87|King's Indian Defense: Sämisch Variation, Orthodox Variation, Bronstein Variation\",\"13zrjohg9oo\":\"E88|King's Indian Defense: Sämisch Variation, Closed Variation\",\"dqkqlwybfn\":\"E89|King's Indian Defense: Sämisch Variation, Closed Variation, Main Line\",\"14oxi5z181f\":\"E90|King's Indian Defense: Larsen Variation\",\"1p90ls0skja\":\"E90|King's Indian Defense: Normal Variation, Rare Defenses\",\"1y8wafq6z1j\":\"E90|King's Indian Defense: Zinnowitz Variation\",\"ldqebgpza1\":\"E91|King's Indian Defense: Kazakh Variation\",\"jndainwnno\":\"E91|King's Indian Defense: Orthodox Variation\",\"qofjx3du04\":\"E92|King's Indian Defense: Exchange Variation\",\"1vmtlbfd444\":\"E92|King's Indian Defense: Orthodox Variation\",\"1uusdqlzilc\":\"E92|King's Indian Defense: Orthodox Variation, Gligoric-Taimanov System\",\"6qy1hw1mko\":\"E92|King's Indian Defense: Petrosian Variation\",\"20urn80f77i\":\"E92|King's Indian Defense: Petrosian Variation, Stein Defense\",\"1g208q3p0xj\":\"E93|King's Indian Defense: Petrosian Variation, Keres Defense\",\"1w3dj79jslx\":\"E93|King's Indian Defense: Petrosian Variation, Normal Defense\",\"2dr0xi08rxh\":\"E94|King's Indian Defense: Orthodox Variation\",\"1z7oprxa9mp\":\"E94|King's Indian Defense: Orthodox Variation, Donner Defense\",\"17deyu8f24b\":\"E94|King's Indian Defense: Orthodox Variation, Glek Defense\",\"x2640c1rrc\":\"E94|King's Indian Defense: Orthodox Variation, Positional Defense\",\"12sf2bzf12w\":\"E94|King's Indian Defense: Orthodox Variation, Positional Defense, Closed Line\",\"dh5g0wda75\":\"E94|King's Indian Defense: Orthodox Variation, Ukrainian Defense\",\"1qtbv6suw30\":\"E95|King's Indian Defense: Orthodox Variation\",\"niakcg3zsk\":\"E96|King's Indian Defense: Orthodox Variation, Positional Defense, Main Line\",\"yfsfseivn9\":\"E97|King's Indian Defense: Orthodox Variation, Aronin-Taimanov Defense\",\"pz8giy21xr\":\"E97|King's Indian Defense: Orthodox Variation, Bayonet Attack\",\"6ngnx2amb3\":\"E97|King's Indian Defense: Orthodox Variation, Bayonet Attack, Sokolov's Line\",\"ox6bhmh6i0\":\"E97|King's Indian Defense: Orthodox Variation, Bayonet Attack, Yepishin's Line\",\"1yst5xerd32\":\"E97|King's Indian Defense: Orthodox Variation, Korchnoi Attack\",\"2646ukpd3as\":\"E97|King's Indian Defense: Orthodox Variation, Modern System\",\"fb3kc6gc2w\":\"E98|King's Indian Defense: Orthodox Variation, Classical System\",\"2fttxs43tpy\":\"E98|King's Indian Defense: Orthodox Variation, Classical System, Kozul Gambit\",\"mloq16tdxy\":\"E98|King's Indian Defense: Orthodox Variation, Classical System, Neo-Classical Line\",\"1db778b17w3\":\"E99|King's Indian Defense: Orthodox Variation, Classical System, Benko Attack\",\"cuz0u9g4qs\":\"E99|King's Indian Defense: Orthodox Variation, Classical System, Traditional Line\"}"),
+	book: /* @__PURE__ */ "1gqf628gy4y.29ugo650tbr.i1oo0yifvw.22i3abb3wln.7r4eardpd.1n7gpt5gp3f.1evqxulk9up.16lyyo64a41.zqqkte3way.2duf22df2md.13zt6ww24t6.2bcgqbvbqrn.kj9lqsc2ai.1jzrx4py4as.pnx9pqn5z7.6oxqki769p.mgr3ihi1pw.y4tik8gd6r.1b4uu4g20cz.26bwxo8yjxl.1385izh3804.wmpab86o15.1gkivjzdsb9.1vvgylsyg8y.1kpbgi5z4m0.wr5tikh8c.1jzsg5qjyzn.1egdxq6fj5v.1f3xka0ex6m.7ucgxeo8w7.1byo9hge5fm.1og162myycc.htr9fwxwte.zcxy98c1c3.25iozi3v4t2.2ay1kb2c0ya.oljn6jc7pd.1df5tbdspkl.23xqvanywv5.20ssy4i67v1.h29dtl1n44.hdvbigu129.lcm8u2xahk.2d2a98bj9rs.177mm6345m8.1qdrmjwx465.1jblbo31509.22b36523aqb.1lqy865awmh.1rfa182fqjb.qcwmtx7xuu.xm93orbsq2.1047th3yuxh.og8a07vthc.1b85ewjqd0k.2dfrizsof6d.q331c3yd2m.1ffvdu900kq.1ym88ii27e9.150mgzgtofy.1e80prvglc4.2e9qs0bkcuw.cop6x6f8h7.1z7tlqfvkpy.1y3xe9p966h.ydlur45lot.21zp1oonflx.aaw7y96j91.10difpucphy.1su6e5c8351.4a596v34b9.65pa35hv15.26k6frr8ajd.1tnebc7njr3.12ed90f8ndl.1o1qlwnyonq.17a80sys0t3.23x615iyzt3.16c6a11xw7q.1p2xoy8k8u5.187ptt1452m.ahyu2wx57c.bw88loryc0.oq3y2gjzzh.1t9j8kgtvxf.2bkj7ipj6zg.1pe10fdzn7v.1p883fchr7k.d9xqumtsnv.ll2fsfphjv.22irpnd3vao.74147e6nb.23vovfjef80.qzp2jv4619.2d6cbirc94o.2ems3jgmzdk.240z8sf3yy.1q5w5a7oeuw.3kk8ewofd2.zez4cbitfc.1uahg05rbfn.9wwq31of6u.1ib6yuxc8mj.vv645henlw.ji56sd0ctx.1xauqnvu8d4.1qvhzprdgkq.14vnmtr2hoy.157mqxcf055.1i1q4rlbw33.183baxj7exk.1qnwoegoamj.vc50q1lmo.7e4dotzbwy.265uvm2ev2y.8ss9atg9sa.1g39x8glgt5.24jssd9qjnw.6fvgg1ly1f.93fjc47cut.28qww7is8gh.w4f0sf66he.1gpoqemwbna.14j2zkl3tep.291br5xr1ii.17ljumgcsvr.ee5kv8s3t7.29q7ju0t00w.eqtt6473mx.23lvj2nb6b3.1xx3qdti3wf.1d18q6kypxn.1015pz2huux.161dxel20yt.pktnn6o8zc.esa6h71l4y.1cuyiudegwk.qo37dxc8ck.1xu2x8nz171.1sokzl0xd0a.3dmoir7xif.7pbhh7khx8.osf8qsk0xn.22u0gfomikv.2cz1coacbij.1731r75qry2.1qkdarpukp5.25eqyytw0ub.jyu74urvkd.j23yb2t8lc.y3n5zyu1o6.23kwj9g1ov.1av0y9f9lrx.nv3khnt94f.2ez5xvpgw8w.1baeih00zo5.vvd0fgugkv.1hjckbgxlci.16i8cl0z0v8.1j1ajwmdw4o.bmhbg9a1zx.27uuekb5igy.xqjvdbftzf.104ohvk65vn.1tikmn3a59g.2ae5wkfqi2.cvr9ig5jyz.bygtevczo7.pxp4b7erj5.i739a29ttg.2s3jr9tjbi.8jhdvs1ju0.boc8xi14ha.1r8nlrs2wps.ic5k0bltl7.15l6gga3gtl.upqsni9fpn.idtc0hq0z9.ly48nn8n3z.astnl4fmo8.16z9kt4qqtw.23bxmntyyvw.1qto2l8rbqs.17reyv4v5bj.18xaao5j9ft.7ku4x1l5hp.22zit3x7n1y.1sdwqes0994.287trqj5hha.1dy5le0w0xs.1hhjslpk6ql.18pqfteg56g.9slkv8hba5.254t0wq7nuq.16cjnbpkm9k.wrvzw2esi6.2d8l3ooj1wp.didhaoubd5.1aiabzwske4.vea9l1xi9h.2fljk62pfwr.10y8zv13a7q.17evi3h8pil.14brxjzt5.nkrlfxpion.5nim65vd0o.1kl3yqa8uy1.sejwjfo2jh.jxjn5jgtc0.26rwf7dnmbk.1bkzpm0ykok.6f84hmc617.1uppbbs5498.uu5m45xqcc.aqetuhh6t9.29i52g7cwfl.1xmy5m0gulj.6f5lrokeam.2bo47e4wkkd.1nv7h63ex6o.1l64ak6jg58.2w35nbura5.1xfsvmdykbr.d8exgf181d.1en8pzixm.13bz24o8b3w.1s60nejfof7.v54exi8dka.5pmp27ma09.1v15ua85zte.23lqhoceb7q.zvhfbtjlxb.2el5ueizrp6.e665bamwlh.1v3n1anjnrm.10nm3jb0qrr.16khuhewzz9.i7shob457z.24eds7je7yn.xhd5v0hqmg.stukai9fys.1eka92td836.4498fi98b5.22s81p8y6mp.1jwy86t83lm.18f5oytjo9w.dqs5tw17j4.tdqaw4cjim.1jlxus5wwpz.wcrf9betgs.11z8gom2i3p.1v04dxgoxld.12hpcilvysf.uwh0vnmdt0.xf2m4c6aiz.a6zk08etty.1nnukwtsulg.fcot9g1m0y.b2hb31ms09.102xokqi1gb.1l5063z6qta.2auuczmvxoa.1ces4n8r34o.2ans7rxp80g.28ixbm12mun.1w8gd6xfyh6.8ezhdm80tu.1qojtnvazab.yenpg07p9n.1cjnv5gigiq.byttihyf5c.27gznkkt1d6.127t0cl73ne.2gayy7y67ps.l8din6dkuw.1sttuwtngxf.17u95aw3y3h.2c29xv3h7hy.teyzc8yaxn.1oxnugiohek.rdqddg5hiv.2ghsv9bj7yd.114a3sibk2u.1havnakw08c.1foxeougyy5.2ezbtmr3dea.2bbkt3djfc4.26cs94v4k99.1co5g80by34.1iyida7ls2g.1s2quu6sypb.vjjoxkehn9.rh6jyl0wxi.3j8op51f80.2g2xagrveta.ma6kshzn1a.3vk36p4l3g.1wv7obhcp8p.2aekb55195m.1c6hatynbqa.284c3s0w7eg.1o1ybm5nwr4.cd9wc74i42.bwsu4ox1v9.qk8idwfp8l.29p82ijkbl7.q6pthazyar.1uh04v4enlu.1bjopyf1apx.16r36lrv97u.fk6yj3zy97.1ohio6z1akw.jx5yw23ok8.afjcxjijlz.13iaq905ydi.auywmuom9.fkeh5978iv.qnylz90cj.yh6b1e4sr3.12fq2wxg0cy.oils9vedhw.16tpo0letsw.hy2vyz3uft.1lt6ivu7x9l.3dskm3vyud.1b23gsajb17.245ycx8mkzj.x1l907fpow.1zjheehgkz2.1xk9iya014b.1qbl3gbdifu.stuu4sxepg.1yx5dwffytg.1p0sc4o2sry.rubwiu0ph3.1gy70w1aio2.1lslc1tzs55.k7mz24dqyb.2u5p5kcfz2.10l9cy1k6e3.1rly3xifkoe.2ffbpy725d2.1tx0uxlm3my.1qvnhx99tf1.mtu79g710f.sc2fh6i05c.g3n8ryyww6.g8713lka9y.1azwmbp3h67.mvzj2xbl1y.5o6mzkhfnt.1z2nn3yp9io.a2tsv4co00.epf565dbak.2f4f01wkdvv.ekk6kd2ze5.3n3qypsb8q.13adpmw3ipb.124s76phxxr.wak3oltk3s.2zt2sw4mqh.18nraws66jv.1nc64zfy86n.1p1bg2m0oeq.1uc1kedrp0w.1kq52gldfva.9cnygomjzb.20tfcqc381b.8w5tshkj8t.b0ccvg212g.815oern7r.7d5dbevk32.1orwxj454au.21qx7fpx1z7.uv3bra6ilv.16l9qyf9bkq.18bbi29ux2f.1jxjaxpi92l.1zldplnzwlj.py9fufl2qy.zteyldb6ir.7w4wvo5h2w.2ae8bbok2r.ufhwdwzcnl.bvhragzxv7.2cwc7qi8439.1f17xz9atlj.953mux04sm.2ev72v293u6.lqjvo5bgk4.8eraowp7mb.1uwrxtrb5dv.ed5dnv917c.2e56jmyxadm.1posqdmdnl9.1argbj3hdib.261wre65voi.1g6cjhbrvgo.1tvc4ela1id.spmajptu14.2d859e7dgtg.2dzx89uff89.hoovupoucz.1lj8khkjnvs.jyko5t1i10.1uifq6v12hd.p0pwl6t7vr.1ji604rd90o.o6907z4omb.tib92134ae.1noxad05cmp.pmb8kq4798.8i9kqvana9.f7u35gm8hk.1ckh6lyoxwi.als1mijf9t.217jejwesqn.jciss48dnx.29h62xma385.k19d1oie50.2cph58x0m45.217kqs991um.1l2lg2259gc.5961phkfg.1tflkezr0i3.caytlaubh5.3fnrtizhsa.2b34ijm3vao.1vpsjzbqt6a.wt8qzil4cb.1yxj6wml9fs.1mq7hwjcwl8.q0wk4jhcrs.1vjceiz1kus.239aknbqjbw.2g0ni76n3dh.1sqjucuw1sb.2lhcxfbptr.1qbg5oodxub.1dlar1wi0u9.1d77p2v4djb.1173c35auuj.1s6w30691t9.1fjloiw4i70.15yxya1t43y.xdbd4du7q9.sxr14ghldf.50w3on9x7v.c50uzc88wm.20ccjxzkwfu.971kqbuarw.285k2yfaq99.1luodmf6ehr.1evptzurypq.zvzt3s24fh.cqfrqao3r.1kxff80rkh.117c6i0nj5.995k837atm.18so23m9u43.oo1md7zg2i.2f9hx0745x5.2gdd51zyfi.1vjxnxphqrf.p7msbs9kam.1giiug7rrmp.1eawleo03w6.6d9yad2gv.1j7cp4dm99x.dq5dxz46mo.1ibp0mh56yi.279dh2ug3a1.1wl3mvpj411.1qyyzx1hje4.h5gkfvw1se.1gkaymgrpjh.1eipb44ah53.u7lp95013m.gte187j2qg.1o894gcpl5p.1g8m4gkvv4a.13avsujvuza.1m37ug2vhk.1mqck0p7xro.fm6jf1kvia.11jtkuy6ny0.1qbiw29rqki.19cj1lo1u31.ijv8iig7e7.1qribsqkqf4.iuzdaiw9fc.ylzgzbyv5e.ob97jja68.1uddm9yk8b4.1kqtjl3d1g4.1a8z658q20.1c5lcpjwk1y.160s3b0cfzw.1j2driqljwn.5rmbd3b23w.20xlpo86g8a.18mslkwqb8l.25wgfl2iuij.1cs6glz58cs.1orgugy14c9.1sfcfw3kvmo.suyhegggj.22t0xgjmjh6.1muv8tsfgp4.1enrzcy0e3a.ze93i85te3.1m6ciu8178c.11dds6wyxlf.iui6xglqf6.29yea96yd5c.1xb6odaxnmf.1huoaclkd2h.zak0nily1a.y412q9769m.24helhnbclc.1btggfgr1gl.2ghahlpc07e.krxj49sxyh.1j8ex62z9ll.1a7ufyc26sy.x1fb53bk3f.21z6xgs8rv3.1uikf8lwjc4.2cxy23ruzf2.1bu8a2g4f7p.1bmv89yixhc.hlcedjerj7.1foz5mfc9s8.1es7l2t8p94.1xmyu9nrdz4.1vqands0dio.ck97xbuxga.2531ynckv7g.bkd7qgn2zw.1y9v38xttm2.y0bbdwyvkw.1alqmw29nz2.1sh7ziw63gq.na4l6tu63p.m5b4c1h88m.bmcwts0tpo.1dwd6ppexa0.b33ud1tyo1.1l6pxi07g12.1nmfpz2pskl.g5yj7ic55n.2cvkcpfpqv1.qjhr45xba8.ipwuo1ownn.1nd1a0yybt.1f8vwe6130s.1bsqlmr6o14.1g3bu605pt.1zactpd1vgm.i0364qc460.1kjwqam4gb9.2a57rjostrq.1w9ne4u5f93.256k15urrcn.o5cyxd6ncj.v26u7yyk6o.1zrbg1zwhqt.o313gfskxi.15a0en88nvj.1seog2jpjdi.1cn2wcz9hhf.6yl696y4gg.26gkwqcvxe7.dt8gwyptav.11iuew2m5bi.2faxl8vnab7.1efbd4d0ol.1bqz4cu0l82.12nh4fmivgp.27a5b5zd412.2bfifv6rl7t.b6kv0i0r.3l7neb39uj.1xg97bw0uvy.bhenquu69q.1h7bam8gd67.2fjssyhy58h.xlgl3b3oga.1cqy2mcau9p.27beohnjt3w.1tmq0mkzh7p.r5ywkktx7m.e9dlpvb8dy.1oh18hcb0ct.74pcw1rs81.i7ovsdg3y8.18x3h1n0hg5.zbbmcpz413.gibu9x7uvv.1xngx5m0rjz.183xhg6exkm.1o7f5k99l5e.mn925pa295.1i1txtei8fm.bk4uhenhyk.rz9qirr7g8.bfueh6i2ih.1rwoo0g105t.1xmn8t7ehtk.2e12rlianfr.1joiu8fzktv.1wjiovrhaht.1fsor60k5in.z71315etf5.1uxxsn9hij5.24ocxuk7io5.yo1s9n9gd8.80khwx5flm.1jsepx4orkh.iu5jbx2o8u.39ox58vm3t.fm5t0tlmw1.1vtrqgr5gb4.293cyvftng7.22m9x50m0bh.pixe4q4ub.aeryfmi04p.uggflwqtmz.v1yocjmfw5.1mn107ttruh.2fyxs7fufd4.1e4zu7vqk71.1ocagkai7i7.265eeuqkirv.1k4q1rvd1mg.dwqonhvy6n.1i6rfx896s9.1upld8behi5.1fyrg1a3k0q.2buukb0q52m.eaqr3pjsh7.1636w64ukrp.28dn5r7753p.39mechfjzt.1laxgrg30ka.10hicmtt64u.1dchz58misb.12ljz04sjhy.21rbbvp6ij3.1cgv5rju63r.9sf862mx9v.284fncadbpf.5cv0yryqh5.gof0wzodcb.18x61xo0w0u.qczod96i2w.164yiujewg8.p6jof56fvu.24i5mwjuzax.12a3pqf3u8g.t2tev5kci9.143ds7zlh9q.dwciqnzu88.t1wea67cg3.29c5ie3j9zj.1i5g2gjjtoi.1u9g6gkny37.imqg39szu2.qcb8b6f2q4.1ajw61yu2en.yg5g6pn7n9.y6if8dsc32.ol7b248rot.gq5lyy31r.wouvtedx3d.wli30oymgs.1ip3zqy0piv.1kazrjwg11w.18k4cr8kieq.jgs7te5kso.1claqj0fuvh.1rltxz1jaab.1vwr8j5bi1a.7w0olq6fzb.jd2ecj7dwe.tb0ksrjg76.kk6md195jx.2ei4dxewqcu.1pxiizr6nlz.2e3esz2ogr5.1m51971z7mj.1bh8eh3k5s4.1svu64k0j5q.wf7pcb2ksi.20uj5ipd51t.251ec22659k.14jkvtkuhns.1rcx10kpk7v.xv2t7zpn4j.21qtu79brj7.tw0v1mf5xt.2dmyujq2wgd.29ckxhne7h0.1iqqewy3ga7.1c0pbx5l4da.230xa73q68o.74stxzs06.1x05x45d3p1.1usesupcsdz.6vs597clbd.1hc4zu3ksvr.i1ufcx2rjy.1z9kp1rwbdk.lsyj8c320z.1rpv7ik7d71.29af7rwvxd7.owucd272o0.njyvj6f5hh.1io9s1sxb1r.1in24djr4f9.1m99hg90vnc.1aimufs19wa.tcybk2ttce.gyf1t0ceil.1z83ru67pva.vzgcxfaj0o.1jnhcqqcmf6.em3jxh1aoy.1lyqdclt9h9.12o3rybn6af.vawe8ebjb1.97gb13d9p2.9z6qh5h2hi.1hf958yfb5f.1pnuglrkiz0.1gasbw8ne4p.2eatll2ve36.v8uew8r6y7.1wfn0pnk6w5.1bxvt2r5by3.1d6qyrwiplm.28q6htc73hp.m1wmed42b1.h17hzhldzr.70gz5orlcp.16ygbcr3d2g.18kr3xbpzsy.1b0s4gx7pt2.1nc55hycyly.9sfrm7jsba.10i5utnznb6.tk0npjlm2j.25gcnod31rp.1xxmmgcjhz9.21r10enx3ra.m4fmsssyta.9krre88tyg.i8dyeicxul.jvaha5vkc6.1l4wnnxtoob.jwur18011f.1hdkx96cvy3.1geo6l0hkes.19f71jjp7xk.lboxm5e56c.292yiiufqf9.2bwchbrg00g.1wu9s8ojlbe.3700gzq39b.1byoquapvet.vtxat5rnrb.19u1xjrrkov.116d0nog2tn.27zeospt8sp.1lztstj1oz.209b1ls40cg.5kr51wgv5m.2bt7zxj5aot.9xpvqxpcm0.2f3tlezoopp.2erk3lg99pp.9jv2p2hwwf.8s5ia1crs2.2ejrwhg5t7f.2bd9w6oo7ar.1na48zcl6rp.234lpekkzhd.1qsl1bvuplv.kg1vka4m37.mdiy5bgy5x.itxfufj930.182m2qk7ac.2adyo8x73xq.1ktox7nowup.ht8xbg2c8t.ltuq6fd8n2.pk7uanaeee.1gv6iuuzt65.dc618hfosn.1x55xr1q3l1.1w335sa1j7k.5ng3zzgfvf.fvcef6hr3o.1bqb05u58ry.2fqwsxkbw23.1l8hblqsmz5.19uulc6uygy.2f27nqzjj95.1owyz8uefrj.1mmq2a3tanx.o0hef0dk8n.1vkjjmtdl6q.xp2b2vrlvv.20rlivxc3c2.rpgbxo5bck.1smrzvfzxno.22dybe03fxr.1a8b5mq7r5g.1hn0kl0q00h.14vv2v4npb5.5ize4kcdon.qp9b0utysg.188aw7ohc3a.kkewahsv8u.1vbggpvv4ff.6qlu2s6b1s.1rcze5j0zr1.10ek5t7iqo7.25w6aklpwrc.xhvm97vrsl.1n69kbddbg2.8upiitj4jt.8ko8ax22n4.1r8ic6zgyn6.1ii4u0ea4yx.r5mbw4489s.m8nxi9bdvh.1jwfbyj1mgi.1pt6s1fot5h.mmqqf9w290.h548vn94rn.245q0jm4pr4.sea963vjy6.1yhinpss0pw.1r5g23cbwg6.1vbeur1zimn.sdbjjm3n9m.13seejtlxtc.217f0ztmkxb.bwb9fobu0x.1bk1pfndj8a.vo1gjqauy8.o0dsuvkaje.egmplvuxqk.29wn3jefsm8.1w15avkr2nr.zaq8d7zlet.2aysiipacc1.1y47fra9qm5.1xlk7vxy4w.9z3txbr8uc.afwkl89yt4.75kuiil6qo.267g039dc2o.1ialnqmyfg9.28ue7eyoblu.41ir7wphm.b6tdaj20m1.xmmeyr5ig9.bpzxhz01m0.2f6vpfmh0ax.upwbd5swzd.i2nll7i6bw.es6hkqyq2h.2cc4ieiy6a6.cfkj0vidh9.m89def5wjw.29p5b1yokh9.ftv82lfc30.245fuubqo8o.1af00lzkz3c.1fqt9b5jvaw.15qvocsjidi.1kjsy438jqv.dr4zvlwn.onj7d4lxp.2exgfsyol9c.8lh2v7sogt.frja6246l2.1bo2q5rzveq.1r74h084es5.8dxjf701x3.prolfy51ej.24acw02yfgw.jut157pe7b.je0dizj10g.18834r78ye8.153braaqdh4.agrtouoqcz.a5n32h1ojm.1nktskcu4ps.6yo8tchbrh.1f9aug79cdo.pluin7lhdf.1305lxg1bp5.2btei29pbc3.uc7gjeiqif.248o87rsm6l.o3edaygw48.1e9sqb0i6gb.2c8nvbb6smo.13ssdx8s0sc.1aqah4gux36.1ssnanv84y3.axchrl0rkm.1mmhfezsyrl.1gg2zcb4fkp.ffm7rpqgd1.haknx8sat0.1t7m5un17pg.1e5zyh6rj1m.1e13msb0t6u.wmmh7diktn.2cr3byujd4u.2bu9ajicq7d.19h3fb3oc3n.w896igytxi.250ss55ewq9.1p29kkgk8eg.t202ciis07.2cuj7odu2wa.qxnys968fy.29w9oxc86sb.13o51pl4md5.1ktzcvhfk1g.1lffrn1e8x3.27q449p0nfg.oeo52f0g81.1pfiiog8fgp.rwyayqb1f3.1mwa9oy1e8m.5gtsnjw8qn.1vtoouj5g2a.1dtxbg38pkt.2cq4b9lbkgj.qknikb55n5.1mq3vlav13y.26fswrsmdd2.1qe05i6fxgw.bob4k9swdy.2a5b6svzvx6.y7l9j04wrk.5fjemfv9e2.6p4amt91wk.hkfeg90yr1.450qxc30pz.1mrzid0xmf1.w32owl6wzh.1p8nvrpmywm.ldbcdm6gmz.2phd2rjoge.kmd5c7apqb.26l6dpgrr0u.qj6aon1vcp.2axg509j9nx.15dgya4jlem.14hqfq8qn2y.y2exo2b3y2.sbjfnubdfe.1lqwwnz5vpp.w6vt7gxnmf.3c0zywehvu.m9pf2jskmp.1gsdbognt7o.1s8ms0r97x6.1f2bp0q32x2.65nus0cbtr.n5a82w2yld.6gpa5kyo10.2atlev66xc6.26i76agrws7.zbjojcqt4d.67bdrgvj9z.1bssdgnyaob.t21wjgv4e1.2dwkvbx5g4t.2398pv9qcru.ybm2cd7xo3.zeb5wfrzks.olefw2onzm.1r9pa8zn14.19wy88ey3nk.1q4f3xrtaem.yq6ylu8zjf.iql9585r62.1robv4726m9.da4bxqjvua.1vw41i2821f.t4u6izen6f.ys326c3x5i.24lm109uvtr.qxe6etdvys.1cr7q6mvms4.1irpwmoo6gb.2ggqvtxmq1i.suugmi7kte.28eniqxhqeb.1qpirjioohz.1rc0b8ekj6h.2ddcjenzk9p.1qv7dwjvmyd.10b55dnbyfh.1v9s9mweeoi.26odvknfeqi.1dnejwts4ul.126gjsm38qk.19k4kc8nrbu.14wj7694j87.afrvg70oob.1blkn82nxyn.1j1pfh8u79o.1nocgpqwt9k.zk2vt9sfr.3c6pbm3xhb.2fmexqrqbdw.20yl7ewi8za.wltru99v0w.gnvzdqcy5g.15t9jvhh80a.olmyqkbuor.20us2afejhu.f8zgfnfbcm.ztypweq946.1egocmo42qq.1hb3agpbahk.2flyfracz9e.n1q0je20hf.uhf9rdp3dv.16reww5992o.22olhjxgiu2.cxtyny0emq.7ve8ll26ac.1jxt0jv6ry6.g54n6tqpm3.1tx9otoryir.2327xdkr6bv.1mg0qtonsve.w48561uq2c.1k65eg67g31.23gtw10fy26.1jsr9p1t2hy.9jo5zr5i6s.2fn0qqhcpxm.1otink6ei9y.flco454hxq.1j8emiqrpx1.1tznbwx08gy.g1sh4iel31.1fot7tdkf00.an07qrurpm.1ow6pn6ueoz.1hglsboqde0.y1gfw7pw04.1qsldsc24p6.xpxe7e0abs.27d4pmp5c1k.2dl6w7fawe4.2cg34bal68i.eonrvu3lrw.109fkvvptbi.ewu9960x0t.2e4www1tp9w.1thh320b7w8.ixkxhy9dh7.187ye2o2y7n.7f0nkquimq.1mtzd0dp2g8.1x9trm6sjad.flr4jasvr8.1bz0jwupjjx.1f7wj5k2eaz.1cocj3f5b8j.v63tktgwkl.12h7bl8on86.aarn842569.r2drt1zxsw.rcaivuptse.4v2xo6vqzz.139ggkz8m6b.3npb25bxwg.s87ndungk0.fnl2sxxoxn.9wti8bnlpk.xaxppq7vyo.19qvv1lxzsr.h9jdrwp0av.dvacho8l4r.j87ci9a76.uwzoybtgz6.ibqg3boww7.10mbtmvhw30.1w50agr7zpz.1thisuxhnqj.1m6en0mi880.2fcdzu8bp1t.217gleoalr0.6zhp88s7d.236vvhrv0y9.18y031k5mt9.f3gsm4by0k.kubn40it2g.1mekok850ge.23a5yl2cnfq.24f9gqj2mlx.20b0bsobh8f.9rwyb2wu12.2dvfm6rfhfk.gfvroy27zf.2eb07rl1580.1sp4x81rjtl.lqsahi7dug.uha5yfx38e.uelqzluq6r.1np05fbd6sm.29nh9lw0sph.1ldtvt9wdtx.9sm3j8ircg.uydz9ysn49.1afc2ks2m2w.20ouhva2pgk.1e9dyccpcsj.1y9iugiu1dq.pfj8gs3d69.1mb4oot5zm9.31s862mucz.hcnwdab5yl.kwl15qzj9v.a0q10gb6ud.mijcw9i2ce.2fdk8zrwp7k.17kogcb92ud.uwi52nub0k.4o4c8w145f.tkb797d0p5.2dltushysly.11hq2hzujkq.dygrhlzovm.a04wuffq09.21hbws85nhj.1f8kvl9ifl5.1nfxme6c8qi.1vbk224zfjz.1mjx2lz1hx.1514f2c5kmr.187nga17zga.1fnkbhl6xub.177gvf8280p.161xmwo031b.1t5dn43ch93.1zhir1rs1em.deenk5xs6k.6ky2d7gdcu.2aso55n55xq.14zwkcpf6cu.5gx48f43s3.28sh8z1ndrb.ppza5ni7cm.zm9dly0eg1.1e6toea9re5.1v23jvcplte.1a4wol37tuv.2gie0ct931q.2cdvv0ntk9o.2fzpjm26eqj.2fufwsksld4.s7m8tzlq17.9ztld3u32b.viyi9s62tg.26mbiuawdcc.3p4084fgdd.1v4egpokada.1263pr6mwd3.18x6rr4r58s.u0d5mnhlzx.2fi492vovmk.1e6g622n635.8q5hr16das.uob0cdc6ul.1wje0541bl4.ocz2sdfpk3.1zdva2cyp2x.264vbdillc8.wmtzw5s725.231g6t6zlc6.25tafz4vkow.3lv5mkrwyb.i09jdzpinm.1vr8nk3fz6j.203v1hz5r24.7g9gw3z9c1.dep1d3k8a9.225izrp6tln.1ckd4girdy6.2f8zs6jg0a6.1514j64969s.1yvjtagcx9g.1ywoio27zly.2af29g320c1.9v092e1cxd.11czex6cpx6.1a0z8o26qdr.22pzkpv2sjz.281x6yp9bsy.1efmufs4110.1kq66ckmgtg.2htjwet0ak.rqbwhdp32s.1g9kg0z4h2y.whd3zxkfjp.23vgq6jwczs.25s8wteyhtf.2f5fvtb1r52.mhfpb5zyg0.2a0o1tgnl9k.2bsghwe6g55.1w4xsfyomv8.jjrw9gis5z.13ckqpoos21.10omuoctsur.67vgkoox35.a7fxf9orae.njnyx8g5o.1o95d5ikcut.1dx40a8bm8k.xrn578v3r0.1k938g2nxhi.2agyt1okphx.1y32y6dorso.gsugrxrp8x.1gxv645780g.rea2emxx0.2b1nyspnqd.1wz5nhnhj6a.1k3vs2zgxgk.rc9fd4lx6e.cztdqteegv.re1alh2krt.1i0n4i5o6vi.1c8838s8xnh.1jxafzglgi7.23spnppwpms.1hxcf90bcb3.ue3yexs8bv.1ttdzwrrf.1amxn2gmtl.2an2cktnb6r.nf3b8agumw.ydmyt4vjmw.jj85oxje61.1ic0wfuunys.16hzx41i5wd.22l5i549k28.ric4344b4y.1ehjqrxi5os.1ymjlrywjgm.2epbcu4rbpk.o75aj0gj90.1q89h2vlxso.1uqofxg5279.1rel8mwlw7b.1oqanwbabtj.mbdzfzdjvm.z6lsrqfer0.23huoj8rtp0.21hhvhezrew.eaw5nyumq9.26x1o3v39g5.984bftjjpi.1iwjsx8q48q.cq57z9cy6i.wz7dkltpmp.ect6h3q7ie.a50wi5yiob.1iqtk3rs34a.sszki5b6zc.3eeiby9jyd.16y319sbuhy.2evix962dfj.64muov0my3.pqz2mxcu8q.2a75oj3yl7s.11q90zuczc7.id9qa66rvp.lyxpexzi7k.14lmb7v9nlq.14kvrmlnb3l.1kyzp5t7aqb.1r2l0pci2vi.1rcu3sxrpq9.1de71322wfw.17jefpa3to3.2dw9n9v8j5i.1ccptqo7f1t.l12t5em6ct.211pv8bwu95.1zdfclsoj87.13g0sbsok0q.9m7gz07xla.34qnfzzrmt.tm75m8sp63.m6c4wfpggs.i562kjbf6h.xr81k7sv63.1ihbtnvg92e.17qlb0asizj.rytpikiih4.f0ijon10jy.lfv55ss9hc.ohmp4jsvjb.hoh65mzoqt.j9b5n3zqdp.27u8zvq6osj.2737nk328q6.jx9wivsnry.6pszlwbn6a.16wlmu786pv.1hxu52m72td.1zunuebp6mr.1untircly4w.2lvzeck5o6.1nokk1jfkv1.fmtj6ofvbi.qye8c185tr.ubj4rih1ar.1v5kkcax7rx.okkbrrpctw.1iqsddtdg7r.1tb32mfdart.2fnkfbpwzs0.glgifmor7y.f0bhk6tirr.a2m9z4867q.okz87mdikr.2a1vwm5nlfz.wfrvsebr2.1g13q0ypicf.1djjs1dwxu.2cf5uxoh6d2.1iucv2goc3.y375xrf33t.1q88vuflmet.odyica4s3b.ujav59jnvw.1972oqr155i.22ju22ou0vd.ovmhbph00.1fgjgxssu9i.fxmrilkta.1a8j76vmflc.2f579ptm8sb.x5mexq51x0.1uih3mlno5l.8831f56oea.1q6yglsklph.17svtz80psd.1rpkhxjsmg3.us1axps7wv.1at7pk40si4.265u1bl91u3.29y7gj0z9k0.2ewjib0ja2p.1x7lpw7vj37.27v0vbzl0hw.14ukmpl507e.xaemjm5seh.zjlyet87ot.1gg4fwaegpo.21y3j841jbr.2a01mldsci2.31rm0kvrx9.27mhplr7id4.1p4rz68jdlg.ma4kf05tr1.23x3xhmfxu3.1wgdldbmdfn.1dih8trt322.2f89o0iuxpm.2560l5um1qq.23bi8cyamak.rqfqirp9yw.s5c5rn9gla.269sur2tdcb.2b8baclm0t8.24vhtbs2sks.803m1kgx6c.igy3ax9ft8.22ho4s5gdpm.186gfdnji4z.for0mvsbye.vhwhj00nbo.ybz8y1jyaa.tg9us0rj3x.134uqxotwac.2g97ayljg6.2ctphviwk3s.1tj2mfg26zw.1c0i7eb7whd.c0kxliq0e5.1yfqy3v9vlm.1vdtiob8gjy.137w108llly.1d3847godfe.yxvzq132kw.7qkb5j7bgn.xtqz5kq6pz.1kou5lps2vt.itwye6kxep.1rs98gr73m8.wbjiq4pqg2.4yv0xwjbd.j0ehglauf6.12v5x0e97zn.1oquom3t4o3.2ahp7endvqh.1vzguzvbjxa.98m56hzthy.1snxkhcf203.tagdr5bnzs.2d141sssl4l.hlbzyk4o3.1bb2nte3nhe.1qillk8oi5i.1y6ke78sa17.1lneku5vjgb.1qw2z8x3uw4.1aodl5c0kx0.j5dad029wj.4ctp6jn7i5.1pl6bbrjd6l.1k6471f7z1v.17mzn8dfdt9.1c73c2gqfak.1en2tx4ytr3.21axfb5fmh1.8y8iyv48k9.14sivwnupiq.1lcpaslcga8.20la331fleo.24gug8b29ws.ktq8duzw3m.7dy01fq9qc.1uhd8v5tpm5.6u2dbdkn4p.xnvlvkedvk.1ez1z9ybx3u.2gbevbn6z8o.22v9aa0cnqs.27qm2st2qqa.1mu3neo0z4l.103928df58q.lf92vr95qj.o29ypb03kz.8q8aggecn3.58v6kqwzpy.21nfveg9a1j.2imsdatyny.2dytx6hup9o.130cxl8hw8s.12svfe2ddws.1hfdzn05vc7.5lzxhq92gg.2biw7uksxqw.1qnnkm252i3.a2zu9si07a.qu0uni4w2j.faubwad277.tz7fn6j11c.usa994fgpz.1t1ln7of8hh.199vjai1eck.22tezqwjdp5.r9o65u3wb6.1kyzzoph1zc.1lipaornwji.8k51gyt6t2.1sazgb3c012.1q4t3rz20kt.e0eus5vtao.fr7bkhtiio.1cdbvxs3qlj.7vmtxk5sh0.bq1ogfdztt.1r5rujiaczu.ieo10gln69.13kol3xa7n2.1g4kn9gy5oh.v6rocbfhcm.1o8o3y880js.2amdhhsg6p5.qoasix6dw5.1l61pffpmdk.qyhocarp2t.a2fw75058x.niq012whvo.1m5ylku044c.12lj26sajmw.2e3h91j1053.1iwjrxkb29a.17bh1grgwnb.1pew3ryxrjh.1bepadh5sbe.27c3iu4rhel.2bncgmo3uc4.1mb32g088ke.3sbz1vguhs.7uoffn7m1u.1rvz97mvuug.1hpz1cskgz6.jerjqik0h0.1uwkcaewict.uued8pnn11.13r6locsxss.14yqgnmfxty.26oxd9vrem0.a6w43holj7.1vjf14zypv9.1xjx6nw6wt1.179barbw8lh.nq4vwif6la.2ex8qfpcfbv.a9oefqw0q7.4r6putuw6q.28sm4utq9hz.lj5i2q6rxb.eehcwpq9m3.uzartrye0f.2dkynf8yy4c.1wdh8r1pkkq.1wk8fbk1mo6.vkga1wt249.xel1b1xjp5.jcn92d9y6u.121niu1t7ff.1ksj5wppjx.1c7vsw255zm.2bn9tqs2xay.2blp4vlegrh.1vlu67hvc5e.3rd87uu79g.1015jplz7fz.17sta3sqc5f.1wpiha0wxn9.13ryac1h1p8.84u1xnyqb.1bonlmdfwbz.qqqrdo8k6x.1vodn3iap0y.2b3i04pfl3y.297qe8fatba.1nc9idw3pbr.1lweir3tsc5.20ryldac86o.nnfwbujsh5.1xoedyjq7hj.62jj2f8eh9.2fl8cmv1fvj.mu80dqzma6.17iasbl5dop.2csh5riccbr.1g8gacwdqmy.dwvw737au.1ksb15wrthr.2dozmhwufxj.46hfg4z2sx.1xns8akgc8n.1065olr2mol.200wfg699rz.9sjfrqhos3.kfvd0hj6bo.emb302axl8.21q96qbgv9h.l4q6j4v2w6.1vjkseenneg.6071w9v94s.25vxy5k9b4y.7j3qv712wp.1i5cjxpqczv.29jihfko4o8.1vam7xkumya.lnpzuwhtf7.1hxvgitqju5.1nnm9hua6kv.1waeibga29q.btrm52z38e.1lmt1lxkq3a.1tmzhq7qw9m.z43eqlecf6.17fsa195d0i.17dxhkamx2z.1s98dqz2x7p.yrhpsnur93.1d03odyl310.1p1z5x99tkp.c5mc5nxmph.cgpix15tb.124nc2jz61o.1kjedp4w3f8.3ewxmo750g.2gm5acmblr4.6vykmq7sir.8wkicxznb7.25egzm5kkvl.wepm2w0szg.1epw0i03cqi.1nriq3b729.2833w7rwlsd.1ge1564mwu0.24287oymu47.zld7vrude1.1tlsp1wuti0.19itrj5nv3g.etcfmgqmj7.1wmwbcisbj7.1dx3ot5m689.9p1altzeh5.21kq25u3y3y.2fva7c0ld9h.mm1fwtmh0l.u1iq02j0es.1x84d9g62c9.lx78y0s1f3.29gnchmdvqy.wtk9vwlhak.syxu34nom6.1kcfg2f1aw0.2dv7biynl8l.1bu1uv2nw06.1kb2eyqdw43.16z3wugm78.r6uegmjb0j.n2hsz5ydk0.1qgsqiuc7g8.1ejj5n4jzke.zinc39oq5a.1oxvhezbyms.22g1g5yvsiv.2axadangg34.i42xu2oidp.1pe16fc2wmy.vsvnmsgl9e.139o64kxrqv.1x3sus6uu46.12u1epe8wg3.6p74vntmme.2a43riv5v1x.1du91nt4gx3.1farfzrx73p.1ofdik6ho61.1arc3nubyf9.2ks6kjxsih.dl3yqm7bp8.1tozpp250gi.1d9oi1e4h6f.go8om5qka6.2327g6gbk41.22sjpdnctcu.cl3dt27cao.21nq8ym3uex.1bey1513u8.1h9ajpip4te.qqbsfumfri.12c4ge6dqey.1ovfo5l9bur.craddtqzok.1gxbc3wbd8r.1k2hgqj8oxo.1a8g1ucs8a5.2ehnov6mngu.14uts88rd20.1do60phr9gj.1ntb385yj5m.16zzmi43srj.wvu7jghtqe.1ycti43n4y.10c46xs8k45.10ez4kfzyqh.147kw28lwra.1e288dpms3.15tf1mq1kx6.22j06r03cb5.1lrqhauzqwk.1van2do2drm.1tri9dx21s7.cp6i0w4fpa.1rx6501p35r.1627qjq0eb4.2g5r67ydgqf.293o4nb1afa.p0axbjxabx.1istym1k0u4.24fbvnvoh8a.2fk7vatiwk1.k0x090nejk.r57gjldxcr.1wzlqu6b39p.2a6kh9bz5d3.1ta5bxa61gf.1cexs72lgzu.1u4ey6chqmb.1uum52hzpar.19jipka18kd.1zwnfdu0kcl.1mfh66bdr19.3mipx5a3wa.iv69w4hb9b.1ejcykqk40q.ml29xfvs3o.16w23biwc2j.b312fts9si.s8dijoqpea.1knucrtbenp.bgceni9a57.1m05sfm0kw2.3zfgzni59f.10gnpg7m6f.1dn6wu374yu.2g3wmxye56z.262yacs7cwz.zsqnr3wrvl.2e9nkwrdv3h.xvxok12jny.1kicwa6acbu.1gsd0zvx10z.fu82kv7cxc.9fgio1ruim.1jewbpiw14f.c2hek2u04m.8v6y2sb32z.vkoa6cvwb4.g4itjetfrq.npeaei2n.1xotu3edjoe.jdsjnxfkkl.1tww5269tpj.ptoor0l48d.1rhzng137yb.9ab9xahbcj.nwy8bfi93q.1a91jovnr4a.lweg8ciz0m.j44uzt3asj.hys1n9y413.bt9isu3itm.1syyxlsgq5x.1zbt0i9n8gv.x6adbpbhgt.145hvnivx58.7tad0r4dav.togjzfpyhv.dr1lqjtr6c.18ho7rokjik.ihid8ilejo.2bejcqxjg0c.ik0itx9adv.sejjhpc73k.1mqbii7mx0z.1c66lywrw1d.5s2mapsm6y.18blyhtvqys.q3aqldf4x8.11vyniw1scd.113zsfahl4d.9a8p1cpo0s.uhgnp4p3fx.2a3tp2n756e.1n2z1rdk6pl.ku7fgxxhk5.68nfwr1z04.1x8xzan6q3a.26y4e71xp3d.1uhmalafh5q.d9mp90jgmm.fqwn8zs9o9.613btk083y.1tdvkpcbl46.om46im73fe.2bnly6wgu74.1tbk8u4e727.16zzqfzlgnz.vjz2ff7t5c.jgxw5unaca.siqxpvigds.1yopsmop1zn.6s77r2jgaf.fd7rpennwo.1qwf9pufpey.14x4nfrjgwm.1ppuglduuw2.1z2nriywv8e.1yskm35z77z.3of0jblspm.gmo3c6iv6h.i18wzht7r1.2fhd1za1i7t.18tmb421j9k.21i8q5g9pbm.2g9s57b4s2c.2ganl1eeftq.12doku3fvum.26c7jpeotlw.1wc9m0cs7oo.hi110g7mn2.287iejh1u5p.2bkd6uvsnag.blwkoklfut.20ve82y0xo1.1ccb96q6eip.1674i0dqfur.w3a6qsnv0o.1ikru4u7qiy.6t0ds55qll.244vbax59hx.evgkgc4ct8.bei9yj8g3n.1vtjhzlif8c.1fjltt6ff52.1893qsbxfr2.z82uc4p935.10qrpcf2i8d.1drqwjlcufc.t1h2kqohs4.fmqexo36m6.1gacl5ssjor.1ob52gtu6yd.112ywzhvcjj.chirzo58if.mcm88si1vf.1n9f8nxi1n9.e8q0se5kml.2ow1vzscyc.2ukhrsmezu.1d73jnofxix.q5ua2qydw4.yd0bfr7se7.fsac2ytlgr.1okrestq6i4.1b4ozsgfli4.1kmy5zo11jq.10f6llqlcf5.w8pqcc5mjf.2g5r6vf461a.1wxvkivqto7.1imwz4v7w6b.1xptiywhvux.1d23vp1z5di.gjqh9mvnq8.8pr16vgyfl.r2etjld4z7.1p6nca6my7.189rd6ofn4o.850ri1wbkx.212pzlbv4bq.dmc91avxm9.2csuldaoh0n.12muz7q1y4e.duh3t116l8.1trr9ef9seu.253ae7s8g89.6bb1ji9k59.1qkuynkwv5d.f63kflkjiz.20dcudivkwb.lkoe99sr72.1q6jzk64pth.vjxxgzlvy1.2fa0b3oro1t.3jflsaerhq.1y3prb56iwq.16qqimjdap6.tvxqywcpgy.y1eif20i79.1nltaqdsbum.3nx5vtetm4.2cx2lu3xk5q.1bi8ef2yaa7.1r12rqvyrha.1uon5w031d8.11ccbdcgcao.17ehwmyhlud.23le1zqdgam.1cwqwhf16g8.1rx0dn4hyvs.51g0ppqs0t.2bhmydhavdy.hnz41obt16.2a7eknqaqsb.cr0obrhvv9.1223nmbmbue.zplbdaqx8a.1elng7rcr6k.1luz4zavtuw.l7i7qp3079.1ccr6qz5hnd.2a23375o7kh.1oar1hic1rm.12io2hxbs89.2d95il28e8s.1h98k0pcgng.17ugv4wy1ft.45z0f0vnfy.1v6lokc8p7n.swo7vxsl9m.1z6au3lcorf.1ige2lw7k5.1vablwfb9z3.1t0ize15w65.hfzjl6upf1.15fjzvuxbnl.1o8ps404zxl.106hi8rl1ti.orzetrorro.vj85ydd878.1vucjwhuvqy.16m68yfrwnq.2fwl0brw3l6.ffazh6dztr.7wo3m372iu.n9t165je8r.qmho8vjcbx.1i9phi3b1na.1acv6c0jsvw.ydn1z3n0xr.29bfjgv0vyb.16i5cfd5j9f.1nipi4t3f4m.p1z1syfaye.ddqqqrrqau.1j8ulwviy6t.1hoynay8bva.1h57thuspmq.12sbwucrq3l.vttcdlcxqs.4p04smzzfo.1dog04yomqm.1o11ql0yd6.19nyeh4xkx8.20apv4a31oq.voutaivnur.ns1uz3kunf.1wxnoyo2u6y.2b5ajpfe1ye.12ouea05cih.2b6w6yvfrn5.t28zy7ylfs.2ga4wa5mt86.vw4ai20a1c.er3ft1wdvd.20m4u7uwlae.c3q3urpk7z.2buzro7ni6r.16rmf0v8yut.1blbasnq2wq.27ks2jega6z.mhb7flnjwg.24vs3cka2yb.255yx2qn4lk.i61yk8k3o5.24dava06800.25i2p7wrj2j.1vf3siluqwu.kvnfufals4.2cki01w2e3x.23xuvx9qgmz.2aw7x4pfoze.uenpcc2waj.of0xronzgn.1ceb104n221.1h58sert0qe.13tlv9h6j64.1rvcrswnemg.1rtxtuchxm0.107mb54ndl4.1gb476upbnl.1cc6lsoh7iq.1z4xe35pakp.12hhkeljxex.2cv3s2pqkiv.v9zlizvaqw.19ilura54vi.1w3ucgmmiz.13l38w5vvrr.tyfa71ta17.2e9mlp9camk.1ww1bq8hggv.1szmybwvre5.1a3vcez8od6.20odoooml62.u07aya04r4.1qgw0cqhop0.xa7ve1lfoe.1tdrgt2fgd9.oa4ae2zgb9.fzqtyjnfu9.zfpk0w28uf.17l3laqeid2.15qqg9nymlt.1r4qkifuvr6.x8l1q9wu55.5x73h2j5dh.1gfhuhj03xj.18xng7r0mns.gltekieujz.mgtkdqf3yg.r77ow93pjt.1k2ykagf5de.vvczcs2iqy.kl65gfk6ai.1cgloy6d5o5.j27vtz9l8c.ya8oybxg1r.4rkf5gcgww.l6e6pga7ge.16ed147jtub.18h0i65uida.ygn8218bxq.1qge5m9ywwf.152rhtcu4vv.fbvv4xdoc8.1fj9yri3y5f.aletf46e4l.8v2nhpi0wz.jpnw0zqztm.13kd2bf066g.jdhfalgpll.s1j2td5r9t.1w7v2i7zeui.46ek0u0o6z.1egz1anjbvg.2b7fkhs17jx.2cy1u99kmbw.24mt9b1ct5q.1cz8hc8kjbz.2eaf3ukm50c.nsm8tstkct.1dpau3zfowb.8x3zoxjler.185gu10r01u.5zodtcvlfr.2645fk94eso.vnynu44hxh.1hkfx76j2f5.1ybthjlsqwg.1chpf61u0bi.1e8syh79bgq.1keet1k8vhh.196a3zvro8v.87k3woiu56.1923loeg0ls.1whizqlb9r6.2cn0ilao6jy.1qw1umginxw.2g6pmw5ynqz.10uowq0ebdk.ft21s60h93.12r29smyn3v.ajk6fcfg9r.1tbew778yuj.115j6n5gejq.14ggxnq23tr.n9ct1hkz2z.ct3wa4bihh.bg5br2efbk.ivdfnwo8np.u5y7yqer85.s61ugzq8bh.rk40ls9hxp.1qgek9zf5sv.1vmkrjblsn.1akd6nyungg.1n7eehaiybj.1h9rpvcgib7.1gbvjgr805s.9yp2bw8sfy.wd0f8beqx.4b6imw5ij8.16inmdketh9.ctgk0c7ham.wgdsuc28u0.1zqqhye4a5x.3w0mu2vhjs.h9ad46rlf0.2ajolhtfwbd.28zpe9pmgfp.186qs56ysg9.j9g4zud2ec.23ww1ox4i5p.19udq4soja4.1pvil6eumzh.ogjjs4fd4v.1kkl3egqsli.167wito2gjr.esf6f0jm5j.jzj4oh0fgp.uvrsaza3no.1mqdx4hees9.16vc96xowc8.1irz3qg1jvj.ivg8bwup5e.1o7eswj37zv.76uqpzb8d1.1t3vtvd2fdp.3uivtz1blr.9ffcgyzd0a.e6jb3ngxgp.2fmd6tvod9i.26fd8foasxp.povc4ja4jr.2c0t0dyrncx.3gvmm0jxoi.1h365f77xvf.1p6si9c0szv.tylmdwf2mo.hf6zzthj6d.cck9fmno69.hbnk6k5vqq.gum10vommy.1hkuyx6hcdu.1n6e16l9tcl.234nhhikywu.1taulte2pp.2f61bt42938.kjdsbx6hxu.wvqqtn1pcm.120nxe5oc9w.rmd74ymdho.1y71bj0p92i.9mbz6gnld1.r25mau9joc.276y2rawk3k.99tfby55xg.pyk5i5j8ex.2eg08ure4p0.16p49ctqlv6.1n44keyumme.1ohhbudpn8a.baocm7sauf.1jesvqw3twz.bfte7tmug4.798y58l843.nmhnhj0cvv.lfgdqwwh3q.cd2dbkr0t.w08aksmte7.q5rdky2t5y.1dxqrgzbbnr.1kq0gq9i04m.1j0lfsq5u7d.2alg7hno0st.1k4ow26l4m1.j1yonaf3nb.1vhqig604pk.1pllem94mq8.ek6uv92fjz.1ogobp52orq.24cati31s9p.2qz111ygm5.9x31ipt4ak.my41hg2mas.1yetldd428i.oix8apu8to.1hav2jssi4o.vcucll3z3u.1yhkaqhp96s.15w4h1evgo4.1svblj8u1wi.21ihslq2rtt.13fsewlu2os.1ajyj3lmykp.2a5dfvgop78.13uwjukmlc8.fygdstpnlx.2jl1zfa5zi.2v4nzqc1mf.atrka3kfhe.lfhom16h1o.26dwual5jjd.wlgiilgzm4.k0msi2av6q.18uw49t3em7.qrzlsb606k.mumrlvh6mn.f4e2pp3b97.1n884th9kq6.59c1a0d8ma.2e59ewqikjs.ixer18hz0f.z6vdgvorgl.1m9iewjxak9.9m20xyva3i.1wsawd7roax.1kefyeu3mqr.1mfzasp2cgr.240q57bplzz.28gd422bt3b.2349h5ko1hm.mwdksnazs3.wm4i834akn.gi9wl16ili.2fek4ys3y4w.29y0ds00ojf.86idhhpbu7.flilb2fzbe.i8aqciejat.1p3d4urztnj.28fxftfd27n.23cqip3asm4.bpkn8fe3hh.ryde1brqmu.nn1a61yfcf.2b8tzxvh3ee.1kkper4smr1.6omkpo619f.1qzj0p90vr2.w3nr8eq748.1fd2dahznsa.10b2t8fwnbd.1s7ar4m0a9e.1mthoksxw53.f5q1fzskb5.1xstaz9h9w5.1sgx6bln9nd.286yk0lbtdi.tilxeo9tpm.2akxu5iugl2.aq2upg6vn5.22apyc9v20g.25pkkbcjfdr.1z93zb4n12k.1jx8dr36iwa.1nx9uy1lfya.16gfsrst47q.1eq2t6nc54c.24qdj4bzeys.w1adl5e037.1za6pcitdjr.1ofjn0v7r6w.2335waeso5c.1ctm03ovss8.zlyhgiocd9.rznibpmzay.2c4bcmroeu4.6kg2viqrfl.vs040ugvmh.1bzai2fn90c.2dwtkpfnjn2.11y6fkhdfxg.18307j1g739.1dyqnqdquxa.7uvcxe97g6.o42tkb2dfc.q8uzao95gx.1r08ugl96sc.1pi6wdblu0z.1e1oah2jd6k.2gasz1clm1c.21ygww941cd.17s49kjytcj.1mecumfzsi5.ph7d0jxu42.1sje4sts8iv.2bznuaf4b7a.w2bx6bq9fc.adp6hgsrxp.115miylvvms.1f0epak9ka6.284llly7wr7.1woyjln3h7m.13rxkzd6fjy.768rg4bfsk.peoh1vb018.205il0ks59o.291dc5h4pvw.4ykbpa1plx.16bkkfejya7.1c87kfkm2su.1ffq5lo6qiq.1bnafil2gh0.ki7h2sgqsy.1qnosm2plnu.1477oov91wa.1pmpvgpccmu.1fubvw7f04n.lkfypcen8v.q79ixq4fgq.27hegvavvj0.26ohy0kgrdu.9r2b22n1x2.uf8rot4z0l.1346gwqkdai.1uayrxz979v.11niulo77nq.15ino9rq9ao.27c31nftpv2.1ga7ew5qwz6.20437u7l99o.24yu60eqkwd.2365qqgr52g.11hl2v2h5pc.1x0beuemcku.1k2j5800eg4.295ac2zf1mg.12d7ismp55z.k47lpxlblp.2g0j2mw5uqy.1wwyru4gt1e.15q3sjl90f0.1c3xngq2f7a.gh4htxgzz2.iotqdootlh.1n6vpr3vcv0.yzxt9ashqp.zhc18kklzr.rn08jvjks8.298mqqn46m7.czcrf1xz0b.2edfrqkx6m.6yokg9vyrx.2fp6gvws0qc.2596l96tjq.tp4849xwqj.13wqujxvpeb.112vuro3lg6.5692m8gru9.mnap2m4w20.yh6srx0tya.1cvlqgvyyxv.2dkbfgpxuop.24ouqna2n0z.28yg2poyttj.13k03pr12yx.140s0pegmn9.1opvyrqgwhb.2rig1kt6vh.1nfznbyeoop.1tsn7eb6g8c.1j5k3fy4oc3.1i5udj6r254.1p6j6h95k7l.i93s8cay7c.qhvb7ozpoa.12tuz4t71fm.oqavbl0131.1j50k3i6hlq.cr135vqnvc.23ij2hqtb3m.3z7ije03bi.2gfl6xt4rf9.2lmzibfvhw.1l7r613qq45.zp1kx309cc.18k9ot3htj1.2d66a13b7ns.21hxa93c52i.298pta3rk2t.1i2rwuzvfjj.1tarrheus3g.1waz2q8kdu0.28mba8jr4b3.1idtdhutwyk.1wg4gh71osn.1one2hot0ei.j8q88z8jch.nujy26wdm9.mefdfopivn.dxz2ycx0ly.1ea92jby4p9.1nww527i7mb.1iwftsm3vhz.1dzo5m5pjdj.256iga4mhi6.1y6bqkdpvha.s614cailwv.kmbx77e3u.e4s66ghlp0.1me1hx9d22x.1efe7ymd7ru.1okvkcbyk6k.9q2tlhgm28.1bt7o5exjkz.e5u461gtfi.1lj74pdutub.16t6tfjqh8p.ca5xxwhdyu.3bcy0h1bdc.26488ythdem.1gyp6sv3sw2.2eobyvf0i3v.1k3tkoakoas.133qcz81qdy.vysrvhi7xp.ltrcpfqe65.jei3e40mdi.1j8ziscfhlp.14nwrfrj8fb.2ctkex1xwax.1y7s6imaz2n.20rvzve3nny.q730l5a5lq.1nztx3dbek1.1uyqvb6p6ga.1fojkxxs58l.10y7yizice5.1idm4c9iwet.1jfj2pnaxgt.2apjkjselt5.2d2kag8hnan.11n2v5no2jk.haymsru9vk.2fwqh0dot1y.2eh8njnwb5y.1igy4rahrs6.1t831qrn8ia.1ju4aayx26w.1nn54zhnkbe.gueipa3hn7.1oby0fvfrb1.l65wayq1w6.446042yghy.1esy3j4m3nh.285pdtulo1i.3wn32vzcv4.k20eweffxe.1qtndkc7q3o.rdcvgv399d.1sfdm3bg98w.143ddb6mpfa.e5ai1oh8he.rj47f5oo8i.1aa6j8yug6m.fzprhx7w4r.1iexra2b12o.1m498ghlth9.196a0yz5ivq.1dn87kiotp9.2b6hv41pm7i.2aqwh84sxgo.wr9ev8aiy8.oxa0257lr7.hl44fffyyt.16yh530y77s.n2p8tq8m0f.1fcjdekvlzd.9hng7bra01.cd21n2pzdz.1zrfif59g9f.1yssevzywgd.2gk8ho9lznj.1zptz43e4h9.dpccyw722u.28i3rchs2et.1t95ebg28x5.oqtryrfjg6.1q1pkbzl99a.1buxs8q6sed.xhwwlgc10c.7y0zh39w0d.2g81hnnqayl.776kl1itx2.1b3m0eg6so4.g1h1kpmqy4.17ev47fg8py.1kkd1rz4jyg.2g6t4otaf7x.2bh28757nl2.2851pfxbxck.3wddekwl5l.wx07u10wzm.bmfpqb345k.g022ca86ij.1dxl1yiykzo.ee2t732ycy.1eiwu7duc2y.2a1x076ygil.nuoggi1xs4.12s8uei5xi6.9m4k5bw5dq.1fgfqrbh63u.1dn4m17i3xa.1zd1t8ok11c.v3kdgunq5v.75j52zfj9c.12is4004nkp.1z4xrns1mqk.1dzh2sbk48l.1uve2nnc3c6.1edyubw1t78.2791iz11m91.tohr4f3kk5.1foox9e2afg.cnanb1tfdz.aep8wr268d.ef1ub9x210.rlvg0vpgek.2d5bvruul0o.4wknj5oynk.1d96r5trnoi.yrk4keqmb1.f71vhmmtal.uqqze2b4d6.11ezjhxsxca.2a2sh84ddfd.251nkbjiwur.1dxzapllfrd.4rrqx58ud2.1ibdalp917n.2hw2ook673.1hr0r5n4iv3.28wyjks4qd8.1vk0uqip061.19w0av7beww.jr6yebc34y.12vr0pejyw0.25x0jklvv16.1r174zvr4n2.496j2utv1.2a00gvia49b.h8rt58o6l5.rxgbgopxll.gx79phs4fu.25lg9t30x42.259ook2z2yt.20t0wbnmj1c.ttpdj7aodj.2uybqwdwzl.1az5r55wl11.1l3ut8da4xc.ee2jmrlbw.2f9d3gyvxec.1ed3znyjvsw.1ze2ts8u54f.exqlfy6s72.25us2wc3dbl.khrs1j6dlc.1xzejpmh6u6.lz2mih6mcz.3u0f6nhz61.1r5l78rja4e.2087mmowgo4.2308nrhy8hw.nytfiikb2r.1wn0ul4hvmr.1052si37jpn.ygqiob1pk0.2fiwvvwt7uh.1jmzqk9mc4s.1he4g2t32q.xr61zclwhq.g2affx0mti.r4vzlbk8qn.278achca93n.11qk4dhmy9i.3lu3tpendh.1qjhbn553bi.1122ck6lba6.2dlyrf65bsd.lqu1lkxxia.drawyzq57z.ed99389hk6.10zk2e8r5po.4ooy6wkkjw.1a5abm6s324.25ba3l2zrui.1rsdigywgy7.tqlcd10tqf.6ccj02a6by.fp6qng0sae.19na215f437.17s5subxoru.261sel77gvg.29q4pv3pi3b.14azalj4b43.sb8g1tvr82.1revcrxo319.x0czpjh7tm.ya0692dyqt.rsqirxfqk5.12zcm6uj42u.2bambeg447p.ybkc1887pw.aot34eqosb.805bgkov03.9y36jn9qcm.3ilpye8cd4.14k2l2bjrcw.124hs56u12r.4n2pie7pa5.1svcw1oune9.298snjyf64v.2atkum98nv3.1hk82uqzly.1io92xxnwtr.zfbi5vy4fr.u0vt6wzyz3.95snlay73l.18i952aey0k.zzswt4xjmj.19gj478agch.12zlrh7jgp9.ycrcbxw3bx.1fbtjesjytb.29z0w4iiiez.mx9n1tddds.8q2cia287b.x39mmqz9ps.ags2xxpgdg.7doef8tfhn.1jnz7pqwchj.2m5wxtn2i1.oepv8itb0v.1cg2c9h6mgc.1hzw0pcz93y.25k30u8nmw3.1bpofg0e712.1jgls2uqbu8.ob4k8e3r1z.it09fzcsag.1oqc8cr957t.1fq5hs92nsn.1n6lfnf56kz.le20hj0oso.2a0a0id1u6r.1ltn2bmffgl.237tlknvpw8.g6iixkjr99.gi9a2a42to.1p5q1zqcukt.2f7vopje2l2.mbxu0epaz0.1bp01z3lbko.2d32jnhnfih.29hjhg30xac.3j1ikdu1tr.220kfc3f9ih.1vt28bpkv16.kdthmw1xhj.1vsumemohii.2718qw61hvz.e5ugmu107j.6wj02ak6ud.mgo7pm9ld2.1bzffogj37v.1xwoljzx7pv.1qlbsa8jl7s.1si7eio8s0m.1b1y4a426nd.2feankjzane.54rca2xhvo.1vm5ubvh56g.1t5rkb6lghs.ywlfagyf7i.29rtys4my00.175282xxtpj.e2kr8ldxup.jsj7uvq3nd.gghf1bg4ge.1wra5qa3w0d.1o0fw9du5tr.o4t91ns2h6.1ax1dvn3mwe.67g1z674sq.2zymtugarl.1i5c96gbph8.ctdjouvxfy.1n9jq1t81c.185i2iyzhwz.s29m7aiuh3.q5alucrfgv.11ddmz906rb.g5300p7elf.t706afgx54.164tn8yfjke.1cg5v3njnby.1qndh1eh4hp.2abixm01i69.nr7tid0jy4.zcx1824sk1.1be0pboovnq.oax2zngokl.1fr37bhmynj.r58vt2ezm3.1x9xj7yzzmi.25nz6rctzc6.26k2m68xemm.q5n8tbnsew.r4m52n72td.lnwxzmasoh.n9is4fbjbj.z1g3aqthwi.14nm63ngvfc.1rk8meroe73.1ichyvpr6m9.13hi01fdyrg.1rbfyxskds8.1a045gazd41.2fnwyt92fub.1v3lb68gczr.wacqa9j1hr.k59uzr34p9.1ejuaq1taod.9lfsgti8b7.sid48ak197.wmev1866ai.jxk60s3xej.1ziac6vznx5.27ipu685vw8.1x6e4uhqgya.62rsrky1we.1vbac3qy7u1.p60ij43b8q.1tscf52qpr0.1bgniafj48z.1ito3zkcep3.hkdsh4pwcm.2dk81v3m0s5.1yi847av012.1wyie4xrvll.kkjrdjqlof.7drqc8ah4r.1aiu63403xe.2cde4s0ynk5.13qzju3ap77.2jc8hgcnnc.146287zjy49.pm4q5vo5pg.1p6cps3fpf6.yelmkcw262.21303mux0ka.d7gzysj4fl.273c83206fl.1098kpf4jlu.1llzn27yt35.67k7wawgl2.ptljz5i1ox.1xq4v9obtv2.oqzrz09zyt.c8o0nhvwgl.1blsxqdm609.r7tu5xi4bx.2bnwbmvz29j.116ey02trma.8dspw8yeyy.vfaae1p9f2.ejzjdl764t.2eiqvi81etl.e2dn1w1fj6.4j7bzafp37.4f69t99bd9.48lhvxdahd.h8af93cb9a.1ccr1q5juoq.1h73aognjbr.uxghthlkrk.nxlw5j7ncl.25docf8d8g5.1xc2p71xgtq.1xlydmjmnlq.eh1au6kksa.1p4o52j5bv6.2gf5df1wriv.1jwkeabrx3n.8qjqidcxyp.29w7andgw9h.23ihg5nmnzw.1jobj5f6te4.2eueg02pd0z.ghacth6ie9.xbi0q9mkep.3r1yaya06b.1ti5zz6f8dk.clz5h1wdzb.22v0mktv80g.21d14h4s8w3.5pxj8o6twd.1tqpq5ejfx2.rdwm4izhak.1yck2hpstbq.kagg9u06vq.2c46nltqrqt.vbqgd2b8q7.1ktyawv2u6h.22084ckf1v8.jvn8goohlb.19bg6dtnzqo.14zl6earddj.1qhlawdv4r4.1ti3g5kzczb.1g4uwppny1d.waaca0exzg.xgyp8xpxp8.1b9o3sp0fqo.3bhyxgvdtj.ub2o57owca.t0wvkx13i8.9u1c3g8n4h.11nc87x5b04.1d6t90knc1t.kvp5v181gr.26gfgdbkhq8.12hn551bfld.6hthqjmajg.2jj8386vvp.26m6gsbqo89.rvefo5sse.wgiry1vf17.1s6hs3nqzej.jkwkol5fv7.glg42b9gjn.13x9iov5vk1.8pxb41icqh.1vuht61kf96.11u31kq6ziu.5kidf8ky5g.a7eo04q6qi.1m2t3iws78v.14lhphvirqg.l6vfaxygnl.176l44qumm0.1xat3ros90w.1hi2w1tmv1g.15424qia36m.lgzbat1azm.yzw7vi4m83.114493r8gq2.6gybupsfe2.1seyh59ug8t.1pk6l0jhkfh.8mtmy74xq7.15oifkuux97.u2ku0qni1q.epdnnqr88u.gl8cko8wzj.1sgu1q1i7ms.l6qfa3zchl.2czeft2nwho.14b4srlf1ec.n0w1kliz9n.103wy1pihb7.1f2dga0b3pe.1zntgebz3x9.2gd3s55ilvx.1vzqj96crgt.1dt37ctt4ex.1nrsmcl6g9c.1y37rzbp9ef.sryppm1zjg.29411u8ptvy.q8dm2kui05.8cl6hxhidh.jeuznhp9km.1r1k9ok9g9m.1lqn9t36fg9.2b89mh3vcmm.9y65dlohc0.1942i988pnf.mc7ei6hzc3.19pge4lvf4v.1t2wmngsfyc.20w3ofo57ni.1olimy6r15a.9oumwuepjy.1e13htbczwg.lci1z76d2s.21hzk0yyvij.180sp0u2sv0.c0j9of6mwa.h3d3zmewgl.1yxt31ahjtt.1rizotgfdn8.56h7t208hz.25naai6ghkf.29uqfs4fhgm.fxogoqm8ql.te82i8jwb7.o0jnqetakk.2antfp5vrd1.xwvey8oip7.1ntav9vm9me.f1bt0xv7st.cgn3zfycf5.29z7swkr271.9q2j2m3eae.i4fkwzewrg.23y0edx9igp.1j2hjtlqvsq.1ysn1cam0jv.19ubbrop41c.21mxpa4i7fi.14al1nno6zg.227i14yupn6.2anzvloosto.kly5ck57na.huqvuhm4t1.5as9s8q0j0.lx1pf3yok5.cvzddyohln.1yaal7gjojg.1d0xfb3ao10.nmd8ui1xwv.1eib8wbrrr5.13qdm30sh3r.u2sookbrdh.28f1oe1jswa.3tbnjfktq1.11b87io2sho.wbg5w79fll.gbkg3daz4a.md8vo8ecq0.134h4la7llk.1o22onu9ouc.23hh8cxdzox.1699wsx6ava.1btavu2eiuc.1ynbtss4e8y.1nbndgm1ukk.15hyfd9d9zc.mrly0iiheg.1pdnkayvdh6.1t4w4qm9qt0.1ozg7a9mz0j.2e51bk324w6.bgtsg8d71w.2bo4dd8otas.z91fpolqks.qq1u41h9z0.28yhckmjgyp.22k07jsepwe.14xmovu9cp9.19lbw3tqcxx.255exy0x2pa.kltjqp1d9l.e474fm6vwu.1xmebr4fc4g.17a856rliie.gv1g5i8wrw.5tw34ilqsa.1si0w5096nx.jj337qy98n.n22mofdohm.18o63k29w9l.tqwf3a0aqj.24ayu3epjtr.19hj60vgmai.urc4z8r76k.25x7jaoi8j3.1oxzdme2nn5.pqq486krmg.1sbkr6lobir.bvadnoy2yr.jijwdpp06p.2dv8c8esgrh.h8z9rgk0pl.u91mxd6qeu.7w2fbor76n.2a08lcjebkk.200vmqz51sv.3g3yan5gud.1npjegpxyz2.wcqfr1g5gu.u6228m17qr.1ge4bp490sz.9mvot4m2rl.1gyfcjxl5lh.exgb7iyxhv.kgl4708koe.21pc6ggr4zf.2ayft4g2etc.uk7wzk0jqm.yr8fbsl554.1vt0220mqar.160ryrzgd6m.h6589dhhij.1x87v27rfp7.43nmkb9if7.1u36e3lwzyo.2ehjau4ypqe.1zv217gjl8l.20e7sn72m3d.12kixdse75x.190vo67fo5f.t42rwylf6i.8t5lxeind6.1rflgx2zgs1.uv3hm3nwh.1haz9sj0lpz.1lxg0aen5g.2g2upxkij34.1q4hq073hii.74v76eahvs.1efchspx5bt.adsya3dmsh.ti6knbjt0e.h9o6yum5iy.1pfn64oyhx5.22wxahzhxr6.1xscbbh787v.1dl6ablwcua.i1w4xzim3m.1j692il1fd0.yh80nm5seb.12763gihgyu.vzeuy1yiu.yy948iqg66.1bp3fi4vj05.h0who1juvq.1gr5gnjdj57.5hj9f0kp35.77d2hbvcr9.1rvzmdedyzh.1l31p86ku4m.1wq1lks2n7a.43woffkb9i.chz0adn6z.1jln17pdzl8.utar9jh5qg.tnqpg0nrg1.84qu0dy8a6.ycdqtrs2o0.11i1qd8qx29.2131d8pxvx1.rklvwd4t8j.ao46hkj6gt.23xc9wvsf46.16whj9hrrgu.r5ofq28x0q.fkgcwury8l.1somwdyog64.m6deouuymn.1vdsw6wl5uc.1wb6vnm3i66.127hf5nu7hb.1p0c144b687.ajdx5zqa2n.2ckzgkt6nlv.1wvfvqbe6qv.i7gk1uf2y1.fj48qmfhjp.2aryw9hoce7.1rz1qw7qw7u.1o683nlz6ta.15zqov7x782.1frb182xdwr.19beul7mb9m.1eh2lixfaea.1qiy087nu8e.1f4m58088ei.1nz8l4w455e.h70kpouhg0.14gri8nwagg.1irc4qz2jgq.1e2tskjw44p.a7ksp5mmus.uzqeiuw1fl.2dnruz5n8a6.a03jtieag7.1k54l8syi06.y159jsopqi.2br5dxl3ghd.lp2hfixycr.exaoyp5jb5.zzs36r29c8.1mj93zen2ik.1f269ve8v0g.d86llumqye.x69wwm60a.dgq8u1dwef.qo9h2krmnl.h04e9g2ktl.1s79kplc9ma.12wrmmd6um7.1x5mtapmqs1.v58lkkp9ed.10nhx9yq7my.tbpg0xnigw.2b0d6sgd7vy.5flyuvpyvt.16j32zfp8ae.4fpze5ghxz.1a8npepibvv.1zqclj1b2w7.14d5qmm6p2b.16907zansrm.12akuwqnsfd.26fncqo6k0j.1u82majf8pu.2gj3pucwbb6.1m2mz1bzq7e.8m6ki7fs37.64yv2frb2m.196yxo6qnif.gk968h1n1k.1xwqw90grp8.q79ms2emvm.e1lfd4drxg.r9wc5c9vjm.2adf54j2osz.9s3yjuye2o.1qlrnt025vi.1klci40u5d5.7huqxjt28p.2edm6u6iluy.b1xtf7ul8b.zg0vje7snp.qbvzx1mh77.1y5owrp5oyy.27b8dietwzz.27lf9twuc30.wwxfv3ofj6.vfpx0so28.1tenlhawq1n.21vst1234ne.1q49pw7br3l.193zdtj79vi.257djpgppef.2eteuhssixe.23ycg7qiqd0.1y0okezk6sz.eye05o44q.1g9bg9zb29o.2cr1vif772s.unq1avob4p.rki72xlqz.nvsadrmnu7.2acxeyllbcj.2v3a6tz18d.1mut2cj8hbi.ovjaek7r8q.pfz28qzr0p.6zg8oi8xtj.2432sy5bl04.1c739yiress.9xrqik8s26.1ytyvj81wzi.177pwmfkk9g.1qlbqy4uuno.1ws205fif1w.250sc4dn49n.17mimc24sao.1u62s7vpbwa.2c6xsoi8w2s.d4qctq2wsc.1dsa7msvbio.p6mlpaw5jz.uj4q4ybq9o.79s84wsj4x.12nv6u0thfc.gvuu8pfrvw.xoxiwnxoqh.1kq2rkd701t.274r927pokd.19878boqzv2.9gxngoq9k3.8grp4cvkz7.2ehapbnir2x.ywy8olh7vy.3lnlzjdrvv.24gfd963e0u.22vko815gj4.1e1534m8ohe.1opxykq6qw9.1fn3c4asr17.1s0gauhn5.h3g2v0rg1t.2b2zus61hs6.sba4vd93cz.snm8mx2mta.1hb39lv10qv.z6o6av1shd.233otdq2ogw.kr6c47cqhr.1uttwal5p7u.1d3hyehl940.5xx597os48.np0rj4z51b.20jnvjt8dyt.1qn6jvzr42h.17bdg0y329v.21ft4h5bgod.19cxe0a4qte.q8n75i68m6.5cayacybvj.ysmurysr52.21v9ga7vggf.1dynb3tzkqd.1hmbu19maxj.2ej8trjuovt.22xyoffhra3.cc8sk92wgq.qj8kgfwntn.75kq392dc4.1278kaw67cu.qo4tlhsxn5.8be5c4wlbg.fx2vakz6bp.1x9nnjsbgso.xijt8le3f3.152s0snfdou.7rrm0sbwjs.1frdpzt0vzi.1zs3j9jvlva.215u8vwcv8g.lxid99hipu.1zclv360mrp.1xqm0c0e7tk.1bpja6lxrmm.2fojf4iw2fq.x4zeu4jck8.1ajkt3v2b88.g9tcve9xn.2dlwns87mq2.1m7egwaxo6p.22ij3invfi9.29gfvwhq75f.2c5c11xjywc.3b4kawx0f9.1uzu6cjvsvw.13ktl5ga9t1.177lfxcf8eh.1iddn8x7ur5.9mdswibja2.2fjn6oaymdu.193k8krdq16.2128f5waxs.1vc98hjf74j.onk5bz2kog.dsackt8zzx.1zrwsyiwd70.13bce5tvh6d.rfmwldfjlk.19gqlphx6cr.vtr4zhlivc.1ahniml558f.28qns3pct0f.144zzxka5l4.1fu7tstuqt8.96yxxlz8ta.ujol49wjpk.18gksqkpy7a.2853uwn0l8o.27f2a0hxfa9.1nnomdvtjkg.1g8acwxbcf9.282ms50ggmj.1ugh4gmt2rl.28tc2in4ca1.7786d0sxb8.1lr91uoq78m.1fztoa2s8x.sqhmu3ca94.2cx1yaz6u14.10mrgm1cqt5.2190oppbixz.fmx9qrht7p.1q2hwj3tv09.i6w1718utr.uuvq6md8ei.27pzbwtfvdo.5nei2tgtq7.279yw9b54yb.cdhe2ttwk0.1pbftowsuxs.1jr3glcy3s1.23t32jpm905.2e03ivszwyf.g7mlutzhdi.252esrijims.mhlq5z8twx.18ui3ms19ho.ekxoj27ij2.21iucjcrdcx.1im9i900w7n.1yd0zqju22q.d3atpnex51.284yys8r2l2.x0ay77augy.23gq8sf7f7r.1724sr2b7y.15rikznqdlp.25q6c7f220q.kxtlywdxkk.2377913okdx.q5yy16pq0v.sr7xn93ipo.osw6icebs7.4mvx5z1mpa.m161h5efnq.z5qbkgt8ax.4srnhdugjz.1mqym25xi22.xazve0hgsw.5hymzwlfqx.aqmmm787tx.tmp9v18o16.1opir3veo8.2bm0csjl1ea.1laj0sy822e.195sbepsfin.9pgwyr2mmi.1dgd0coawbc.2b9yumlopg4.1w67gu2vwhy.1iqyaac9l6o.2cpqxx4p60k.1t7it5qe22.2dz7pgtzog6.28p3wjobdn4.668jqxgk2m.korvcfthoj.2c4zv6k8kq0.stzod6fcid.18tz3srk8wg.1t6f5bs5ccg.246gzwdl5x7.1l7cto2ts45.6p7x6305c3.22y2l25s3ph.z3sytovd9n.27idiuh2ie3.b6sl4v1p4k.1tgrcl7k9g6.1tiglpues5q.1i2kjkla2h0.7seb2i2ad4.1v9x9o2ihgr.2fy401tqmuj.1y0jdwo0lfm.1c55ca9gqqs.2eqjk69ysk9.1klf0myxvck.ehlkcwnggx.b6ydudtc39.pseu4a3ooh.yqem9vhj05.d2d3zyfhcx.nw4q2xmrb6.1axcgowmxl4.1jexkml2unr.1ovcx0kk9bv.1qcffffw452.1neezseqik.219n3qeibct.2ek7a470px6.3f7pci5n4b.h3566wcptw.jcxzioblad.fz5acrprpe.136k8n5bgj9.2f95fm550tr.18p5r2l2xa4.1y1h45iuxwx.1xxf1hjkemn.2cbyetag89.rqjdvf5lic.yzujnys81.1kvz62mftnm.2abbraz69ib.9kozeky43e.bg70exyih5.1cia3wdkqpr.1u1k5ir2wb1.25t7t0ggfkc.2ev1qukklbe.1m7r4it37fg.1ig461e824q.2bpox99jrhi.b5biv9lnpv.176kqd7zd4h.1xxntfzvp6i.1hi0wxdw2cg.10qsgkts5dm.npp0g9hvt6.fttvcytbd9.22xkwqrgabn.y23sackirg.6vuk00rpum.ai0dg2knwg.8670q4vcx6.ud5td53rog.v396x9dbrx.2f6eszthbs3.1q9v899h4my.1zx5y5dxiqm.214ahukclnr.277vmm6q4tc.1aeesatj37q.rtyeohtb1d.265ao8rn2e4.rrgq209gn0.1iobeeafa1w.eglk4nde6e.1o09g8ubees.1zgbhn3jalf.29fxeb9ap68.1j1xao9z22s.1416lt9w7gs.neo4tx043t.1fvk1szt7g1.2492olk81wp.1byscnqkj5c.1wyjkwatx97.uozxfyclp8.18mdhtcc5f4.16l1elv8u8x.xy6doojgdc.x3f5thl93b.2bsaesgwonn.13uysstkoes.1oeyrw3a66t.twwl24nwud.kl4xch6ljz.1mdig4vq18e.11lvo5hkhpo.1gqeihzdw57.1t35aedu8iw.1lobd2mzzjt.1qe41mm4hnt.1xupuvhn674.1ol7qdg3a05.1mzfal1e95g.ynqu50t0k9.1gzraod3ozn.23hxfh9c2p5.2dsl138w1s8.1vespqyef7s.v4zg8incdn.uwzynr5m7r.1mwf1cmfkqn.fh6xusl37j.1ga4vnt6ryd.jkqgwr5fqn.1cex2axb0tn.18hbgcw71h6.1d9cvvdfxft.hnowo6vjf5.24rdds944fb.13sozshx9uo.514e6n9cwy.1ma58u43gac.1zzwmzww5ip.1w2mceghjja.1sn2c72tjir.1opag0fq3av.29ew0fukjvu.9j06u12o6c.g53cf6tusu.2gd56ok0bdf.qwkb1vxd3y.14r07gm6x9q.27refh34oph.x9bhx0212h.1zj19dv3bxq.136dhm4i64j.23tu87vzsxh.1x3dr1w6o5t.qn4q36clql.slpa7fvmiy.s3bnfof2s9.236xnah0owa.18wpp4un3ic.17wrszpdzte.44jzcyx3l0.s390dt91cv.5brgdfudm2.1usxtdk6hor.s88hrl3s7q.15gnk995afc.1zg6hsw1pbf.1x4l6ipsp4s.y2riompnxj.ro2hay8wbb.rm92iyrzoh.25lr0waslap.1q068unsoy.1mtojc8p2x3.1uo9wcjx762.1bozil8sugx.11ldkxhsyub.1q3ktzxh7h7.1wlqj1h5g1p.sntgaapr0m.1xxqerx2srt.1ss9nba42ha.282st91g77o.knci56x4hp.yc0yvu6rhd.ooj0gm3354.9f7wspwny1.23kpy2ch7c6.yhh355xux2.t83y71gqnk.1ni332as5x8.j5pmnbf4j3.1ua25b3dhc1.1xbajby30za.21pp00myaq6.waolc0nu2f.ayyf7ubbvs.1fjxzf0sl5t.7m8oryjzw.wndhby2d15.2go6tkwlip3.1fg3i4avwgy.o8vtp5gzqa.satgu7hkte.26ye9x5v4zk.1f0bjpoimzr.e3egiqhohq.i2h4inpmzy.1jfisxp03sq.a4ve0jttf3.1nez3wqcndl.2fkitmeghx8.1owv3pmnza8.2ek5veojndm.1wejtpbz7wt.1ioilmieuu4.1bgtuxvxvr5.1833rjft2jq.312gysx4zi.1wouxliz0by.2fhmvch02mh.oy6l23xpfm.7e8wml6nv9.85jq2u49if.huwsgurvn7.1gf6i0p1ng0.1bn9uxypi4g.280ovsfx60d.1ty45561yqs.ygnseolo8w.1x7jwls0p6o.27hnkppm1m0.1zhc2shg9re.29ss1qajlp0.1yo8va0lqe8.14sz3hj2h9j.rvnhcf676v.yj7bifu8xn.1lmkeqavb47.22bx3obc15i.27tifzfqcta.75rlxvl8w9.17rnpx71irz.x4f7rlmd79.1etyxvalhjh.1ublofzcm6a.1hugrct8994.1dgfvxwpk7.2jt1sbhx54.90vdpwbft.z7p79haw4q.212djb86pdi.1ra6i1tbbfl.18yfyyqxiuq.1p0nlijwkeu.ctpyullann.1nvcz1duz79.10v8xx91uf9.26tl7n4c6l2.1caepmv40gh.1q9bqh4f4l3.psjhofbsnj.3a2j9ut6jo.10d5lsa968x.97mwhh9925.2dd8hc7vyk9.n44qk5m3x4.x9rlnmmoa.1qdjz1lh50w.206zol2vq4m.mxq3u8hlm0.1e7yij8raze.1ldemc7bdmp.1cns7lu0gri.rqveg8vlq5.1pekzgbrvqu.4jxu72dkhs.1v39j3z8n7h.2af658fnb2u.1j8rx1ehd13.2fp9yhubnls.21pzvqnwh3q.11p8o5osi7d.223d2htp1ik.zxruu3qqw3.1c1t2wwovz1.blitq2jv5j.nisz0coxvj.2eny6oihwgl.18mgfl7r7vj.fw15suvmc6.1y1qoguqilk.tw5iz3qujl.15nspqcp02y.1ktqnzn133r.268cgfryu4.16vhz7uvooz.ylieyrim2h.22m9c60cdxb.236nq08v1bf.1qqnl7ww3kf.2ctgalzx8vw.pksfyhcv5n.1rdpl98udy5.21o3i3pbmt4.1vndi5wmg3m.g87pcc2s8w.90hedg2gxp.65c1kej50c.2hwrpqpb8g.1rf22vs6n9m.rcf52dh5v2.2a6catc7twl.1k0ryktnkxv.zmygnzu1z0.1u88sc14ya7.i503c65x82.tevmc5wga7.1qppdjylub3.p8gp3uctx8.tu4vahfvl0.4nyggm0a34.axarq8tsgn.jkyynwu8pi.1n53eohma3z.1erjss9q1mz.11z2sxboy45.iitvxh0lvn.1qw046zwqgx.3wqo8shc6d.8ekad5kuv8.1guxwmio5d8.18zps22fli6.j19r6ne76a.gh3ay589q9.1924inma5n6.1ovtnqxazpb.1osv3nso97v.sni6as12t0.19o7a780oyi.1hkbnhdip5j.g3ergpf2ex.10frxth9k8v.25lx21pu3q2.2fbpievre4o.1v7j4emp3dv.1ok0kj4gtl7.1nvk6h4uhrz.9j2lqakaf3.7cnfuztx0m.1571vi6kyv6.uxuxiflz2f.1tf2uzq1kkq.21ny7i1v0v.17qpo22mtft.oqpqrpet70.82qut1mf4r.294nchbod87.4or1vn93b1.165x5g2tr0u.1i8fss17jtx.28u6izv5pd0.oiyi8ngk0z.6c9m8zabjy.77l2qz5it1.22red697dll.2bhl1giugnr.16al0yw8cgh.uan6vi0ymv.xa9whnvu8.1ajxskpskl3.28c395656zd.1in89tqpbzx.1rhqjevfwwu.1zt4u14vu5i.2f5bhfb33qo.1n3cfjxm8a3.272f0bcduhk.69eqshimt.1pkc564e03l.shqyeaijb3.puke1y56s0.12eax504wle.8mw2p35w54.17pofpu6xk5.2bq1xa8n2ly.12qci0lhob2.279ea0iek2s.1bui0wt877q.bngl5a5qtp.1ng4wmyu125.1auwh3fc40f.16npre8gdpl.1idf92h2rbt.ozkkye893u.17yp25810jl.w5qhc3yozc.kb6xe0j4p7.mb7x8kengu.c5aej1m16r.2arlekv321t.1hfw2jp7iyo.1b37sbe5ymp.1jjix1o8uiy.1tfno7m3vu7.2et3t63yf8v.11auh8doxlq.29g8409u1pc.24zj8tpzic5.1kf3te5gct2.1g94k4z6x6q.11sggcz6yhw.hu4g4240m6.2btw9pn4chr.nvvw0y0u8n.16hh0x6btvp.350cdo2410.2dq4ocp18yo.2e8isdk03kx.1uyzn2ik9q2.210rtwp7gsc.kp38uuj4d9.qlbvnx6hu7.17gbo0keqfr.17yjci2bmid.juqx982zj0.13yhdi6js7n.1nwibw3ohxu.xxxhir3em3.2b2vp623kzz.1j3ltuvtpv3.qgdv37cloc.1t3za28wvzg.n9z6q1d0xn.1i780apb9x3.2axep2tz0c7.11y2xvam4yk.g1rmh3om1g.1azan4dqai0.26ycbok00l6.1jk0dc6xicc.v5jp3xquor.1wfpot3hyrc.103mbxeb2gj.1eg2xurtz1u.zavt5iy11c.1mp6hm5jswc.14gvyw3i2zo.244xrv6brbv.130rroaodf2.1hxj4vn0q7q.s3conmaqne.1wewmj50pft.5e0270zukx.atjywe6u6o.1jqy2wz6w7r.47wkzepgv2.kzjz9cwjbz.21nludh1w7l.1ngv5lgiine.2af9dth8bx8.1joudqpdh9a.24bxflvef.22lbxy80oom.zoepohh41w.22afqvcf3p2.17c2n6c68bg.2cmqyqx3cse.1tozsczrcl3.26ym7gf7fb7.20gqr6vv08p.l4m2d7mz94.6v8h5weqti.1ypql6044me.1nfbvrbnju7.1mq1k1t2655.ol15bpndjw.x2i1lq42qz.1ahznknjuhz.1yj3miv43vi.1c7cw1nk45u.1o0qhax8p2h.307absjcv0.6mst2zxfg.1znm1dgb19l.119c7luvh4b.g9x50kqsef.13t904dhlot.wfzbo3vhu.guowdegldc.m762o8rori.1gdj0fokvop.1pfz1sr7qdc.13e0cmnsfkn.22qngkvnwiq.aqj3x5qesk.1pg6lqvtcu2.9dzx2scrrq.2b6fpvx044q.9oimv497px.c12cikh122.636ayrilon.1q6q1crnzxv.63sbc4y3r0.zfv8a0lnn.b40ffid043.2d41c137k3q.8z46nkt6lv.21phc5nbnr9.15s5ggbek3c.1a2izqzwx0h.1ijefwj740o.27sx2k6j9c4.106diwgdy6p.1wh4j5mnftg.58qvs1du8w.1ju27dnunzv.1bamyg8049c.1w3888wpi48.f82mf5nsdb.gvsmqxqvcr.1p65w5xqdre.23rfy7hk3pp.tbedulfx5i.11qjj12wd7f.z9trp2go0q.uwuomnn5y4.onobxazp86.1b3w4311l15.21or5mzsxgp.f21f8rd9y8.19hd5uurhg4.22uf7psvrsr.wz8yp01djf.137b65assvr.6im63badyy.261k024omau.xabrpmptuo.1yg9mqgq9ui.10l44zng1t4.1uisurz3bdl.1gkzoq6l78r.11xw997hy1x.20quesy3ppd.1n2nseiqb74.235bpnqhz15.2dau2xyil1a.pa9dfniy9m.21qmb5xxbx3.8rp8zvyhu6.1w604uwowsi.27ic2k27s6w.syrexuh43t.28b7evbcjyf.ppdgvp3h9z.pssa5abpih.1rhpuxxtv8m.v6taitrxwz.tordovksme.60q5240hbi.1mntsawydmc.odogc3myjl.y2wzoyeftd.uo4dxft3az.17q9gdgqrbb.vyqaxho4yy.2769yy1xbzg.a6dkbchoia.1rj9zjchuq8.2dgf97z4px0.20snzpj8ro5.1y8re062owh.arxkwaziy1.1hxzz3z1w25.qy5rumi9pm.1jsave9nlyt.7zpl3vwhsm.w7tmil8yrg.coppqci9vl.snbm9q71d4.1jmdasupirx.cqdk6gyn38.2ff6pziqxpw.127y3npvtvg.6ca4a314zu.2ecb3ow96cy.14g4p1homxy.2b7guf75zfp.1vvx92fo0sj.1htcq8dd8oo.1no2g8vg2z.1ccnhzm2997.1qonakstdn3.1aqiu6qefvs.1aeiaabvwac.oz7vadrz05.1bmp1p0x1ik.qii50mc9y3.2as0b1wt1h3.1nwmt8ykxak.1ivc07c0m15.crbglf0rm4.2fam3vnnrva.112j2704rog.24xt6f9t6nd.19jtsn1d74j.608vi6cjc.tj9h93g1ws.1xhd3p94e4r.20ua6vg7moo.158ovyx5m3a.22lhg786mm1.gfrynlvu5o.ub3e6hxzvs.owbmwk7t7c.290kqy30hhs.grkwtix6zo.1mhpsfst2sa.1bf8nvnwvqe.1wr9zb4r41w.11si7jtiz0.hgoip9n509.1hzvjolq6um.24rvfbdj9hg.gk4py1xcvy.297wzlfklvr.1g51hh1t4xo.rvqw81atij.a7u6fiq3c0.mccor9oyps.2g5ojexevrh.3x5pbegy3t.n1n0awwt39.5uj78twu18.z3qls2vh5u.2g9dtk6i4t9.21uio57qpbx.qj2tb5ibzj.sge65eccm0.9adhh2n9lc.1mmz7p53fa8.1dy7ih75uqj.2f969rme75p.1gx72dmkpoe.1ok4esxmn2p.13irggzmxdj.4b7zlxv7bo.tow64o7juk.13t363wbnav.76vjzhfob7.1vqb54qmp8n.2cvlo04b0t7.v6o3ywsfkq.1dmtb9xej67.14fnu203zfc.khjm20on2.1yivbby689r.1m4nngiwboo.4yb92g3epp.q0320mm2n0.1bavq9zwg7p.6mfawts5xx.lm99lvp6sc.263bjsnmve8.11dh5zxm7uo.1q06aoxugeb.3ezy0dt4l4.25icvr87zaf.11xqmlx2fbv.23k10g610fa.22qvpkhxxxm.2zixwmmtac.25xwkb8ul9u.nrxxphnbzr.21b34kmvacr.v9ux3nt6yr.118lu5fvsgo.nwxbkop55y.23b4ns4po94.2e8h78fzidb.279f0z7jn7j.96xomcbboa.1rv3josr62f.23q48qfhp1s.4ajbnvxqeu.12alf080bxk.m07y81des7.1n2sw6ry347.hg5vyhmqc7.1fjugjpmg4y.1qqotabhg9v.1jqhpx6d8kq.1a0eugvmw0t.1nqb5tgp7i0.cdgn2sephx.yljigl8yaq.cfm7bm14b0.tml9mdjv2z.yvuly2qcu4.28yl9cdgeal.1b5ha1lfi9j.2ogl2ew48w.17hh6x1d3v3.kc0i7lr4bw.7e3obss2pg.243onipzzgj.1wgclfix4n5.xhim0ogpsm.1lwimx06qwc.p2t5z942ne.2e4ap18tpeg.fq5hya1sn7.229smw0nm3k.cz1wwnelox.1lzzorrft6m.1azigsubu7q.bwhs8gbt3y.n7fiixce36.r9trhlnoul.2akq7fa7hpv.22ea8m6ejwh.1kxorhl9ewk.ba2y1uzdyf.471njq1itc.u5remsmnp4.1c2ju1508zt.1fcgpvfzo8w.1s3b4s33nyh.1afzgu6z0ce.2bjkebijqw4.2emu2dnh5li.60k9qhl31h.18c8k32mvkm.1vcaar6mdtm.238lol2607c.1zitu1nxf.1k9ynndmsqb.1c48xb3x5vi.2en6fge1go0.133pb3cw5ip.19nzcox4u0x.jldzc3qgh9.2ctillgtx1r.dzm4lwxblm.2geq1qzjvxm.28yv9kypwrl.1v79hks09a7.1h3zh0xp639.8fjr6hj3jn.1egialaqjkd.1w4z4jpe9fu.65tcfulovu.1tyzy13heps.18a8yh8eie8.99y3t7j1jb.2fgudbkyeul.kqzis5fvjf.229s3t6dugc.22gnw1nkdrs.4hv68dgdwh.26yyzdiluzb.1j0mfyor8vf.22wtrc1f2ar.1ov2132x311.2cc3h1hbm3k.u1bej75egt.drtwfflvuv.10qej34sib9.1brekbht163.1k55p2lkbrn.1bilrye8nga.n6w9td0svi.16amfyc15a7.24e9eux72ee.uuducw46rn.mnpoe6kvv3.1ercdfbceh7.izuryap31z.9ojgoihbzn.10zb2tvd9l1.veum74wzez.rbhf5ipg0x.1ybesjijp7g.13dufmj6uvi.pums3u67nx.z1zcg3i85h.1hc0sed557r.1fpl05tblq7.sexwmmbp41.26siewdrpd5.1g9q28puq6m.nynxl8j28r.3z8qop15uo.1rpt5cwenih.1y9giyf2q2m.answtsxz0q.1e0qfu188wn.ffq41szzqg.25sqyuknd4r.9t2ghvr09a.amex2k1zg7.asmmxuikph.xnivk41deh.jd4drzcu0o.17hkkhlvlcz.29k8176gpo3.k9jnvcmuzr.1f5zz0cjigi".split("."),
+	ecoFamily: /* @__PURE__ */ JSON.parse("{\"A00\":\"Van Geet Opening\",\"A01\":\"Nimzo-Larsen Attack\",\"A02\":\"Bird Opening\",\"A03\":\"Bird Opening\",\"A04\":\"Zukertort Opening\",\"A05\":\"Zukertort Opening\",\"A06\":\"Zukertort Opening\",\"A07\":\"King's Indian Attack\",\"A08\":\"King's Indian Attack\",\"A09\":\"Réti Opening\",\"A10\":\"English Opening\",\"A11\":\"Réti Opening\",\"A12\":\"Réti Opening\",\"A13\":\"English Opening\",\"A14\":\"English Opening\",\"A15\":\"English Opening\",\"A16\":\"English Opening\",\"A17\":\"English Opening\",\"A18\":\"English Opening\",\"A19\":\"English Opening\",\"A20\":\"English Opening\",\"A21\":\"English Opening\",\"A22\":\"English Opening\",\"A23\":\"English Opening\",\"A24\":\"English Opening\",\"A25\":\"English Opening\",\"A26\":\"English Opening\",\"A27\":\"English Opening\",\"A28\":\"English Opening\",\"A29\":\"English Opening\",\"A30\":\"English Opening\",\"A31\":\"English Opening\",\"A32\":\"English Opening\",\"A33\":\"English Opening\",\"A34\":\"English Opening\",\"A35\":\"English Opening\",\"A36\":\"English Opening\",\"A37\":\"English Opening\",\"A38\":\"English Opening\",\"A39\":\"English Opening\",\"A40\":\"Englund Gambit\",\"A41\":\"Rat Defense\",\"A42\":\"Modern Defense\",\"A43\":\"Benoni Defense\",\"A44\":\"Benoni Defense\",\"A45\":\"Indian Defense\",\"A46\":\"Indian Defense\",\"A47\":\"Marienbad System\",\"A48\":\"Queen's Pawn Game\",\"A49\":\"Indian Defense\",\"A50\":\"Indian Defense\",\"A51\":\"Indian Defense\",\"A52\":\"Indian Defense\",\"A53\":\"Old Indian Defense\",\"A54\":\"Old Indian Defense\",\"A55\":\"Old Indian Defense\",\"A56\":\"Benoni Defense\",\"A57\":\"Benko Gambit Declined\",\"A58\":\"Benko Gambit Accepted\",\"A59\":\"Benko Gambit Accepted\",\"A60\":\"Benoni Defense\",\"A61\":\"Benoni Defense\",\"A62\":\"Benoni Defense\",\"A63\":\"Benoni Defense\",\"A64\":\"Benoni Defense\",\"A65\":\"Benoni Defense\",\"A66\":\"Benoni Defense\",\"A67\":\"Benoni Defense\",\"A68\":\"Benoni Defense\",\"A69\":\"Benoni Defense\",\"A70\":\"Benoni Defense\",\"A71\":\"Benoni Defense\",\"A72\":\"Benoni Defense\",\"A73\":\"Benoni Defense\",\"A74\":\"Benoni Defense\",\"A75\":\"Benoni Defense\",\"A76\":\"Benoni Defense\",\"A77\":\"Benoni Defense\",\"A78\":\"Benoni Defense\",\"A79\":\"Benoni Defense\",\"A80\":\"Dutch Defense\",\"A81\":\"Dutch Defense\",\"A82\":\"Dutch Defense\",\"A83\":\"Dutch Defense\",\"A84\":\"Dutch Defense\",\"A85\":\"Dutch Defense\",\"A86\":\"Dutch Defense\",\"A87\":\"Dutch Defense\",\"A88\":\"Dutch Defense\",\"A89\":\"Dutch Defense\",\"A90\":\"Dutch Defense\",\"A91\":\"Dutch Defense\",\"A92\":\"Dutch Defense\",\"A93\":\"Dutch Defense\",\"A94\":\"Dutch Defense\",\"A95\":\"Dutch Defense\",\"A96\":\"Dutch Defense\",\"A97\":\"Dutch Defense\",\"A98\":\"Dutch Defense\",\"A99\":\"Dutch Defense\",\"B00\":\"Nimzowitsch Defense\",\"B01\":\"Scandinavian Defense\",\"B02\":\"Alekhine Defense\",\"B03\":\"Alekhine Defense\",\"B04\":\"Alekhine Defense\",\"B05\":\"Alekhine Defense\",\"B06\":\"Modern Defense\",\"B07\":\"Pirc Defense\",\"B08\":\"Pirc Defense\",\"B09\":\"Pirc Defense\",\"B10\":\"Caro-Kann Defense\",\"B11\":\"Caro-Kann Defense\",\"B12\":\"Caro-Kann Defense\",\"B13\":\"Caro-Kann Defense\",\"B14\":\"Caro-Kann Defense\",\"B15\":\"Caro-Kann Defense\",\"B16\":\"Caro-Kann Defense\",\"B17\":\"Caro-Kann Defense\",\"B18\":\"Caro-Kann Defense\",\"B19\":\"Caro-Kann Defense\",\"B20\":\"Sicilian Defense\",\"B21\":\"Sicilian Defense\",\"B22\":\"Sicilian Defense\",\"B23\":\"Sicilian Defense\",\"B24\":\"Sicilian Defense\",\"B25\":\"Sicilian Defense\",\"B26\":\"Sicilian Defense\",\"B27\":\"Sicilian Defense\",\"B28\":\"Sicilian Defense\",\"B29\":\"Sicilian Defense\",\"B30\":\"Sicilian Defense\",\"B31\":\"Sicilian Defense\",\"B32\":\"Sicilian Defense\",\"B33\":\"Sicilian Defense\",\"B34\":\"Sicilian Defense\",\"B35\":\"Sicilian Defense\",\"B36\":\"Sicilian Defense\",\"B37\":\"Sicilian Defense\",\"B38\":\"Sicilian Defense\",\"B39\":\"Sicilian Defense\",\"B40\":\"Sicilian Defense\",\"B41\":\"Sicilian Defense\",\"B42\":\"Sicilian Defense\",\"B43\":\"Sicilian Defense\",\"B44\":\"Sicilian Defense\",\"B45\":\"Sicilian Defense\",\"B46\":\"Sicilian Defense\",\"B47\":\"Sicilian Defense\",\"B48\":\"Sicilian Defense\",\"B49\":\"Sicilian Defense\",\"B50\":\"Sicilian Defense\",\"B51\":\"Sicilian Defense\",\"B52\":\"Sicilian Defense\",\"B53\":\"Sicilian Defense\",\"B54\":\"Sicilian Defense\",\"B55\":\"Sicilian Defense\",\"B56\":\"Sicilian Defense\",\"B57\":\"Sicilian Defense\",\"B58\":\"Sicilian Defense\",\"B59\":\"Sicilian Defense\",\"B60\":\"Sicilian Defense\",\"B61\":\"Sicilian Defense\",\"B62\":\"Sicilian Defense\",\"B63\":\"Sicilian Defense\",\"B64\":\"Sicilian Defense\",\"B65\":\"Sicilian Defense\",\"B66\":\"Sicilian Defense\",\"B67\":\"Sicilian Defense\",\"B68\":\"Sicilian Defense\",\"B69\":\"Sicilian Defense\",\"B70\":\"Sicilian Defense\",\"B71\":\"Sicilian Defense\",\"B72\":\"Sicilian Defense\",\"B73\":\"Sicilian Defense\",\"B74\":\"Sicilian Defense\",\"B75\":\"Sicilian Defense\",\"B76\":\"Sicilian Defense\",\"B77\":\"Sicilian Defense\",\"B78\":\"Sicilian Defense\",\"B79\":\"Sicilian Defense\",\"B80\":\"Sicilian Defense\",\"B81\":\"Sicilian Defense\",\"B82\":\"Sicilian Defense\",\"B83\":\"Sicilian Defense\",\"B84\":\"Sicilian Defense\",\"B85\":\"Sicilian Defense\",\"B86\":\"Sicilian Defense\",\"B87\":\"Sicilian Defense\",\"B88\":\"Sicilian Defense\",\"B89\":\"Sicilian Defense\",\"B90\":\"Sicilian Defense\",\"B91\":\"Sicilian Defense\",\"B92\":\"Sicilian Defense\",\"B93\":\"Sicilian Defense\",\"B94\":\"Sicilian Defense\",\"B95\":\"Sicilian Defense\",\"B96\":\"Sicilian Defense\",\"B97\":\"Sicilian Defense\",\"B98\":\"Sicilian Defense\",\"B99\":\"Sicilian Defense\",\"C00\":\"French Defense\",\"C01\":\"French Defense\",\"C02\":\"French Defense\",\"C03\":\"French Defense\",\"C04\":\"French Defense\",\"C05\":\"French Defense\",\"C06\":\"French Defense\",\"C07\":\"French Defense\",\"C08\":\"French Defense\",\"C09\":\"French Defense\",\"C10\":\"French Defense\",\"C11\":\"French Defense\",\"C12\":\"French Defense\",\"C13\":\"French Defense\",\"C14\":\"French Defense\",\"C15\":\"French Defense\",\"C16\":\"French Defense\",\"C17\":\"French Defense\",\"C18\":\"French Defense\",\"C19\":\"French Defense\",\"C20\":\"King's Pawn Game\",\"C21\":\"Center Game\",\"C22\":\"Center Game\",\"C23\":\"Bishop's Opening\",\"C24\":\"Bishop's Opening\",\"C25\":\"Vienna Game\",\"C26\":\"Vienna Game\",\"C27\":\"Vienna Game\",\"C28\":\"Vienna Game\",\"C29\":\"Vienna Game\",\"C30\":\"King's Gambit Declined\",\"C31\":\"King's Gambit Declined\",\"C32\":\"King's Gambit Declined\",\"C33\":\"King's Gambit Accepted\",\"C34\":\"King's Gambit Accepted\",\"C35\":\"King's Gambit Accepted\",\"C36\":\"King's Gambit Accepted\",\"C37\":\"King's Gambit Accepted\",\"C38\":\"King's Gambit Accepted\",\"C39\":\"King's Gambit Accepted\",\"C40\":\"Latvian Gambit\",\"C41\":\"Philidor Defense\",\"C42\":\"Petrov's Defense\",\"C43\":\"Petrov's Defense\",\"C44\":\"Scotch Game\",\"C45\":\"Scotch Game\",\"C46\":\"Three Knights Opening\",\"C47\":\"Four Knights Game\",\"C48\":\"Four Knights Game\",\"C49\":\"Four Knights Game\",\"C50\":\"Italian Game\",\"C51\":\"Italian Game\",\"C52\":\"Italian Game\",\"C53\":\"Italian Game\",\"C54\":\"Italian Game\",\"C55\":\"Italian Game\",\"C56\":\"Italian Game\",\"C57\":\"Italian Game\",\"C58\":\"Italian Game\",\"C59\":\"Italian Game\",\"C60\":\"Ruy Lopez\",\"C61\":\"Ruy Lopez\",\"C62\":\"Ruy Lopez\",\"C63\":\"Ruy Lopez\",\"C64\":\"Ruy Lopez\",\"C65\":\"Ruy Lopez\",\"C66\":\"Ruy Lopez\",\"C67\":\"Ruy Lopez\",\"C68\":\"Ruy Lopez\",\"C69\":\"Ruy Lopez\",\"C70\":\"Ruy Lopez\",\"C71\":\"Ruy Lopez\",\"C72\":\"Ruy Lopez\",\"C73\":\"Ruy Lopez\",\"C74\":\"Ruy Lopez\",\"C75\":\"Ruy Lopez\",\"C76\":\"Ruy Lopez\",\"C77\":\"Ruy Lopez\",\"C78\":\"Ruy Lopez\",\"C79\":\"Ruy Lopez\",\"C80\":\"Ruy Lopez\",\"C81\":\"Ruy Lopez\",\"C82\":\"Ruy Lopez\",\"C83\":\"Ruy Lopez\",\"C84\":\"Ruy Lopez\",\"C85\":\"Ruy Lopez\",\"C86\":\"Ruy Lopez\",\"C87\":\"Ruy Lopez\",\"C88\":\"Ruy Lopez\",\"C89\":\"Ruy Lopez\",\"C90\":\"Ruy Lopez\",\"C91\":\"Ruy Lopez\",\"C92\":\"Ruy Lopez\",\"C93\":\"Ruy Lopez\",\"C94\":\"Ruy Lopez\",\"C95\":\"Ruy Lopez\",\"C96\":\"Ruy Lopez\",\"C97\":\"Ruy Lopez\",\"C98\":\"Ruy Lopez\",\"C99\":\"Ruy Lopez\",\"D00\":\"Blackmar-Diemer Gambit Accepted\",\"D01\":\"Richter-Veresov Attack\",\"D02\":\"Queen's Pawn Game\",\"D03\":\"Queen's Pawn Game\",\"D04\":\"Queen's Pawn Game\",\"D05\":\"Queen's Pawn Game\",\"D06\":\"Queen's Gambit Declined\",\"D07\":\"Queen's Gambit Declined\",\"D08\":\"Queen's Gambit Declined\",\"D09\":\"Queen's Gambit Declined\",\"D10\":\"Slav Defense\",\"D11\":\"Slav Defense\",\"D12\":\"Slav Defense\",\"D13\":\"Slav Defense\",\"D14\":\"Slav Defense\",\"D15\":\"Slav Defense\",\"D16\":\"Slav Defense\",\"D17\":\"Slav Defense\",\"D18\":\"Slav Defense\",\"D19\":\"Slav Defense\",\"D20\":\"Queen's Gambit Accepted\",\"D21\":\"Queen's Gambit Accepted\",\"D22\":\"Queen's Gambit Accepted\",\"D23\":\"Queen's Gambit Accepted\",\"D24\":\"Queen's Gambit Accepted\",\"D25\":\"Queen's Gambit Accepted\",\"D26\":\"Queen's Gambit Accepted\",\"D27\":\"Queen's Gambit Accepted\",\"D28\":\"Queen's Gambit Accepted\",\"D29\":\"Queen's Gambit Accepted\",\"D30\":\"Queen's Gambit Declined\",\"D31\":\"Semi-Slav Defense\",\"D32\":\"Tarrasch Defense\",\"D33\":\"Tarrasch Defense\",\"D34\":\"Tarrasch Defense\",\"D35\":\"Queen's Gambit Declined\",\"D36\":\"Queen's Gambit Declined\",\"D37\":\"Queen's Gambit Declined\",\"D38\":\"Queen's Gambit Declined\",\"D39\":\"Queen's Gambit Declined\",\"D40\":\"Queen's Gambit Declined\",\"D41\":\"Queen's Gambit Declined\",\"D42\":\"Queen's Gambit Declined\",\"D43\":\"Semi-Slav Defense\",\"D44\":\"Semi-Slav Defense\",\"D45\":\"Semi-Slav Defense\",\"D46\":\"Semi-Slav Defense\",\"D47\":\"Semi-Slav Defense\",\"D48\":\"Semi-Slav Defense\",\"D49\":\"Semi-Slav Defense\",\"D50\":\"Queen's Gambit Declined\",\"D51\":\"Queen's Gambit Declined\",\"D52\":\"Queen's Gambit Declined\",\"D53\":\"Queen's Gambit Declined\",\"D54\":\"Queen's Gambit Declined\",\"D55\":\"Queen's Gambit Declined\",\"D56\":\"Queen's Gambit Declined\",\"D57\":\"Queen's Gambit Declined\",\"D58\":\"Queen's Gambit Declined\",\"D59\":\"Queen's Gambit Declined\",\"D60\":\"Queen's Gambit Declined\",\"D61\":\"Queen's Gambit Declined\",\"D62\":\"Queen's Gambit Declined\",\"D63\":\"Queen's Gambit Declined\",\"D64\":\"Queen's Gambit Declined\",\"D65\":\"Queen's Gambit Declined\",\"D66\":\"Queen's Gambit Declined\",\"D67\":\"Queen's Gambit Declined\",\"D68\":\"Queen's Gambit Declined\",\"D69\":\"Queen's Gambit Declined\",\"D70\":\"Neo-Grünfeld Defense\",\"D71\":\"Neo-Grünfeld Defense\",\"D72\":\"Neo-Grünfeld Defense\",\"D73\":\"Neo-Grünfeld Defense\",\"D74\":\"Neo-Grünfeld Defense\",\"D75\":\"Neo-Grünfeld Defense\",\"D76\":\"Neo-Grünfeld Defense\",\"D77\":\"Neo-Grünfeld Defense\",\"D78\":\"Neo-Grünfeld Defense\",\"D79\":\"Neo-Grünfeld Defense\",\"D80\":\"Grünfeld Defense\",\"D81\":\"Grünfeld Defense\",\"D82\":\"Grünfeld Defense\",\"D83\":\"Grünfeld Defense\",\"D84\":\"Grünfeld Defense\",\"D85\":\"Grünfeld Defense\",\"D86\":\"Grünfeld Defense\",\"D87\":\"Grünfeld Defense\",\"D88\":\"Grünfeld Defense\",\"D89\":\"Grünfeld Defense\",\"D90\":\"Grünfeld Defense\",\"D91\":\"Grünfeld Defense\",\"D92\":\"Grünfeld Defense\",\"D93\":\"Grünfeld Defense\",\"D94\":\"Grünfeld Defense\",\"D95\":\"Grünfeld Defense\",\"D96\":\"Grünfeld Defense\",\"D97\":\"Grünfeld Defense\",\"D98\":\"Grünfeld Defense\",\"D99\":\"Grünfeld Defense\",\"E00\":\"Catalan Opening\",\"E01\":\"Catalan Opening\",\"E02\":\"Catalan Opening\",\"E03\":\"Catalan Opening\",\"E04\":\"Catalan Opening\",\"E05\":\"Catalan Opening\",\"E06\":\"Catalan Opening\",\"E07\":\"Catalan Opening\",\"E08\":\"Catalan Opening\",\"E09\":\"Catalan Opening\",\"E10\":\"Blumenfeld Countergambit\",\"E11\":\"Bogo-Indian Defense\",\"E12\":\"Queen's Indian Defense\",\"E13\":\"Queen's Indian Defense\",\"E14\":\"Queen's Indian Defense, with e3\",\"E15\":\"Queen's Indian Defense\",\"E16\":\"Queen's Indian Defense\",\"E17\":\"Queen's Indian Defense\",\"E18\":\"Queen's Indian Defense\",\"E19\":\"Queen's Indian Defense\",\"E20\":\"Nimzo-Indian Defense\",\"E21\":\"Nimzo-Indian Defense\",\"E22\":\"Nimzo-Indian Defense\",\"E23\":\"Nimzo-Indian Defense\",\"E24\":\"Nimzo-Indian Defense\",\"E25\":\"Nimzo-Indian Defense\",\"E26\":\"Nimzo-Indian Defense\",\"E27\":\"Nimzo-Indian Defense\",\"E28\":\"Nimzo-Indian Defense\",\"E29\":\"Nimzo-Indian Defense\",\"E30\":\"Nimzo-Indian Defense\",\"E31\":\"Nimzo-Indian Defense\",\"E32\":\"Nimzo-Indian Defense\",\"E33\":\"Nimzo-Indian Defense\",\"E34\":\"Nimzo-Indian Defense\",\"E35\":\"Nimzo-Indian Defense\",\"E36\":\"Nimzo-Indian Defense\",\"E37\":\"Nimzo-Indian Defense\",\"E38\":\"Nimzo-Indian Defense\",\"E39\":\"Nimzo-Indian Defense\",\"E40\":\"Nimzo-Indian Defense\",\"E41\":\"Nimzo-Indian Defense\",\"E42\":\"Nimzo-Indian Defense\",\"E43\":\"Nimzo-Indian Defense\",\"E44\":\"Nimzo-Indian Defense\",\"E45\":\"Nimzo-Indian Defense\",\"E46\":\"Nimzo-Indian Defense\",\"E47\":\"Nimzo-Indian Defense\",\"E48\":\"Nimzo-Indian Defense\",\"E49\":\"Nimzo-Indian Defense\",\"E50\":\"Nimzo-Indian Defense\",\"E51\":\"Nimzo-Indian Defense\",\"E52\":\"Nimzo-Indian Defense\",\"E53\":\"Nimzo-Indian Defense\",\"E54\":\"Nimzo-Indian Defense\",\"E55\":\"Nimzo-Indian Defense\",\"E56\":\"Nimzo-Indian Defense\",\"E57\":\"Nimzo-Indian Defense\",\"E58\":\"Nimzo-Indian Defense\",\"E59\":\"Nimzo-Indian Defense\",\"E60\":\"Indian Defense\",\"E61\":\"King's Indian Defense\",\"E62\":\"King's Indian Defense\",\"E63\":\"King's Indian Defense\",\"E64\":\"King's Indian Defense\",\"E65\":\"King's Indian Defense\",\"E66\":\"King's Indian Defense\",\"E67\":\"King's Indian Defense\",\"E68\":\"King's Indian Defense\",\"E69\":\"King's Indian Defense\",\"E70\":\"King's Indian Defense\",\"E71\":\"King's Indian Defense\",\"E72\":\"King's Indian Defense\",\"E73\":\"King's Indian Defense\",\"E74\":\"King's Indian Defense\",\"E75\":\"King's Indian Defense\",\"E76\":\"King's Indian Defense\",\"E77\":\"King's Indian Defense\",\"E78\":\"King's Indian Defense\",\"E79\":\"King's Indian Defense\",\"E80\":\"King's Indian Defense\",\"E81\":\"King's Indian Defense\",\"E82\":\"King's Indian Defense\",\"E83\":\"King's Indian Defense\",\"E84\":\"King's Indian Defense\",\"E85\":\"King's Indian Defense\",\"E86\":\"King's Indian Defense\",\"E87\":\"King's Indian Defense\",\"E88\":\"King's Indian Defense\",\"E89\":\"King's Indian Defense\",\"E90\":\"King's Indian Defense\",\"E91\":\"King's Indian Defense\",\"E92\":\"King's Indian Defense\",\"E93\":\"King's Indian Defense\",\"E94\":\"King's Indian Defense\",\"E95\":\"King's Indian Defense\",\"E96\":\"King's Indian Defense\",\"E97\":\"King's Indian Defense\",\"E98\":\"King's Indian Defense\",\"E99\":\"King's Indian Defense\"}")
+};
+// src/lib/positionKey.js
+function ke(e) {
+	return Ae(e.split(" ").slice(0, 3).join(" "));
+}
+function Ae(e) {
+	let t = -559038737, n = 1103547991;
+	for (let r = 0; r < e.length; r++) {
+		let i = e.charCodeAt(r);
+		t = Math.imul(t ^ i, 2654435761), n = Math.imul(n ^ i, 1597334677);
+	}
+	return t = Math.imul(t ^ t >>> 16, 2246822507) ^ Math.imul(n ^ n >>> 13, 3266489909), n = Math.imul(n ^ n >>> 16, 2246822507) ^ Math.imul(t ^ t >>> 13, 3266489909), (4294967296 * (2097151 & n) + (t >>> 0)).toString(36);
+}
+// src/lib/openings.ts
+var je = Oe.named, Me = new Set(Oe.book);
+Oe.ecoFamily;
+function Ne(e) {
+	let t = ke(e);
+	return t in je || Me.has(t);
+}
+function Pe(e) {
+	let t = je[ke(e)];
+	if (!t) return null;
+	let [n, r] = t.split("|");
+	return {
+		eco: n,
+		name: r
+	};
+}
+// src/lib/pgn.ts
+function Fe(e) {
+	let t = {}, n = /^\s*\[(\w+)\s+"((?:[^"\\]|\\.)*)"\]\s*$/gm, r;
+	for (; r = n.exec(e);) t[r[1]] = r[2].replace(/\\"/g, "\"");
+	return t;
+}
+function Ie(e) {
+	return e.replace(/^\s*\[[^\]]*\]\s*$/gm, "").replace(/\r/g, "");
+}
+function Le(e) {
+	let t = Ie(e).replace(/\{[^}]*\}/g, " ").replace(/;[^\n]*/g, " "), n;
+	do
+		n = t, t = t.replace(/\([^()]*\)/g, " ");
+	while (t !== n);
+	return t.replace(/\$\d+/g, " ").replace(/\d+\.(\.\.)?/g, " ").split(/\s+/).map((e) => e.replace(/[!?]+$/, "")).filter((e) => e && !/^(1-0|0-1|1\/2-1\/2|\*)$/.test(e));
+}
+function Re(e) {
+	let t = [], n = /\[%clk\s+(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)\]/g, r;
+	for (; r = n.exec(e);) t.push(Number(r[1]) * 3600 + Number(r[2]) * 60 + Number(r[3]));
+	return t;
+}
+// node_modules/idb-keyval/dist/index.js
+function ze(e) {
+	return new Promise((t, n) => {
+		e.oncomplete = e.onsuccess = () => t(e.result), e.onabort = e.onerror = () => n(e.error);
+	});
+}
+function Be(e, t) {
+	let n, r = () => {
+		if (n) return n;
+		let r = indexedDB.open(e);
+		return r.onupgradeneeded = () => r.result.createObjectStore(t), n = ze(r), n.then((e) => {
+			e.onclose = () => n = void 0;
+		}, () => {
+			n = void 0;
+		}), n;
+	};
+	return (e, n) => r().then((r) => n(r.transaction(t, e).objectStore(t)));
+}
+var Ve;
+function He() {
+	return Ve ||= Be("keyval-store", "keyval"), Ve;
+}
+function Ue(e, t = He()) {
+	return t("readonly", (t) => ze(t.get(e)));
+}
+function We(e, t, n = He()) {
+	return n("readwrite", (n) => (n.put(t, e), ze(n.transaction)));
+}
+// src/lib/cache.ts
+var Ge = /* @__PURE__ */ new Map(), H = null;
+try {
+	H = Be("wazir", "cache");
+} catch {
+	H = null;
+}
+async function Ke(e) {
+	let t = Ge.get(e);
+	if (!t && H) try {
+		t = await Ue(e, H), t && Ge.set(e, t);
+	} catch {}
+	if (t && !(t.ttl !== null && Date.now() - t.t > t.ttl)) return t.v;
+}
+async function U(e, t, n) {
+	let r = {
+		v: t,
+		t: Date.now(),
+		ttl: n
+	};
+	if (Ge.set(e, r), H) try {
+		await We(e, r, H);
+	} catch {}
+}
+// src/lib/analyze.ts
+var W = {
+	fast: {
+		label: "Quick",
+		hint: "Depth 12",
+		depth: 12,
+		multipv: 2,
+		movetime: 700
+	},
+	standard: {
+		label: "Standard",
+		hint: "Depth 16",
+		depth: 16,
+		multipv: 2,
+		movetime: 2e3
+	},
+	deep: {
+		label: "Deep",
+		hint: "Depth 20",
+		depth: 20,
+		multipv: 2,
+		movetime: 5e3
+	},
+	max: {
+		label: "Maximum",
+		hint: "Depth 24",
+		depth: 24,
+		multipv: 3,
+		movetime: 15e3
+	}
+}, G = {
+	depth: 10,
+	multipv: 1,
+	movetime: 300
+}, K = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+function q(e) {
+	return e.from + e.to + (e.promotion ?? "");
+}
+function J(e, t, n = 12) {
+	let r = new L(e), i = [];
+	for (let e of t.slice(0, n)) try {
+		let t = r.move({
+			from: e.slice(0, 2),
+			to: e.slice(2, 4),
+			promotion: e[4] || void 0
+		});
+		i.push(t.san);
+	} catch {
+		break;
+	}
+	return i;
+}
+function Y(e) {
+	let t = {
+		n: 3,
+		b: 3,
+		r: 5,
+		q: 9
+	}, n = 0;
+	for (let r of e.split(" ")[0]) n += t[r.toLowerCase()] ?? 0;
+	return n;
+}
+function X(e) {
+	return e.isCheckmate() ? {
+		type: "mate",
+		value: 0
+	} : e.isDraw() || e.isStalemate() ? {
+		type: "cp",
+		value: 0
+	} : null;
+}
+function qe(e) {
+	let t = Fe(e), n = t.SetUp === "1" && t.FEN ? t.FEN : K, r = new L(n), i = [], a = [r.fen()];
+	for (let t of Le(e)) {
+		let e;
+		try {
+			e = r.move(t);
+		} catch {
+			break;
+		}
+		i.push(e), a.push(r.fen());
+	}
+	if (!i.length) throw Error("No legal moves found in this PGN.");
+	return {
+		headers: t,
+		startFen: n,
+		moves: i,
+		fens: a,
+		clocks: Re(e)
+	};
+}
+function Z(e, t, n) {
+	return `review:v2:${e}:${t}:${n}`;
+}
+async function Je(e, t, n) {
+	let r = await Ke(Z(e, t, n));
+	return r?.complete ? r : void 0;
+}
+var Ye = () => ({
+	brilliant: 0,
+	great: 0,
+	best: 0,
+	excellent: 0,
+	good: 0,
+	book: 0,
+	forced: 0,
+	inaccuracy: 0,
+	mistake: 0,
+	miss: 0,
+	blunder: 0
+});
+async function Q(e, t, n, r, i = {}) {
+	let { moves: a, fens: o, headers: s, startFen: c, clocks: l } = qe(e), u = W[r], d = a.length;
+	await n.newGame();
+	let f = Array(d + 1).fill(null), p = Array(d + 1).fill(null).map(() => []), m = [], h = c === K;
+	for (let e = 0; e < d; e++) h &&= Ne(o[e + 1]), m.push(h);
+	let g = m.lastIndexOf(!0), _ = null;
+	for (let e = 0; e <= g; e++) _ = Pe(o[e + 1]) ?? _;
+	let v = {
+		key: t,
+		headers: s,
+		startFen: c,
+		startEval: {
+			type: "cp",
+			value: 0
+		},
+		moves: [],
+		white: {
+			accuracy: null,
+			acpl: 0,
+			counts: Ye(),
+			phases: {
+				opening: null,
+				middlegame: null,
+				endgame: null
+			}
+		},
+		black: {
+			accuracy: null,
+			acpl: 0,
+			counts: Ye(),
+			phases: {
+				opening: null,
+				middlegame: null,
+				endgame: null
+			}
+		},
+		opening: _,
+		preset: r,
+		engine: n.info.name,
+		complete: !1,
+		analyzedAt: Date.now()
+	}, y = (e) => o[e].split(" ")[1], b = (e) => {
+		let t = a[e], n = y(e), r = f[e], i = f[e + 1], s = p[e], c = q(t), u = s[0]?.pv[0] ?? null, d = u === c, h = _e(r), _ = s[1] ? _e(s[1].score) : null, b = 100 - _e(i);
+		d && (b = Math.max(b, h));
+		let x = Math.max(0, h - b), S = Math.max(-1e3, Math.min(1e3, R(r))), C = Math.max(-1e3, Math.min(1e3, -R(i))), ee = d ? 100 : be(S, C), te = d ? 0 : Math.max(0, S - C), w = v.moves[e - 1], T = new L(o[e]).moves().length, E = De({
+			legalMoves: T,
+			isBook: m[e],
+			isTopMove: d,
+			bestWin: h,
+			secondWin: _,
+			playedWin: b,
+			winLoss: x,
+			sacrifice: (d || x <= 2) && Ee(o[e], c),
+			isRecapture: !!(t.captured && w && w.to === t.to && a[e - 1]?.captured),
+			opponentErred: !!w && [
+				"mistake",
+				"blunder",
+				"miss"
+			].includes(w.classification)
+		}), D = Y(o[e]) <= 14 ? "endgame" : e <= Math.max(19, g) ? "opening" : "middlegame";
+		return {
+			ply: e + 1,
+			moveNumber: Number(o[e].split(" ")[5]) || Math.floor(e / 2) + 1,
+			color: n,
+			san: t.san,
+			uci: c,
+			from: t.from,
+			to: t.to,
+			fenBefore: o[e],
+			fenAfter: o[e + 1],
+			evalAfter: z(i, y(e + 1)),
+			winBefore: h,
+			winAfter: b,
+			winLoss: x,
+			accuracy: ee,
+			cpLoss: te,
+			bestUci: u,
+			bestSan: u ? J(o[e], [u], 1)[0] ?? null : null,
+			lines: s.map((t) => ({
+				score: z(t.score, n),
+				depth: t.depth,
+				uci: t.pv,
+				san: J(o[e], t.pv)
+			})),
+			classification: E,
+			phase: D,
+			clock: l[e],
+			opening: m[e] ? Pe(o[e + 1])?.name : void 0
+		};
+	}, x = () => {
+		let e = v.moves, t = (e) => R(z(f[e], y(e))), n = Se([t(0), ...e.map((e, n) => t(n + 1))], e.map((e) => e.accuracy), y(0));
+		for (let t of ["w", "b"]) {
+			let r = e.filter((e) => e.color === t), i = t === "w" ? v.white : v.black;
+			i.accuracy = t === "w" ? n.white : n.black, i.acpl = r.length ? Math.round(r.reduce((e, t) => e + t.cpLoss, 0) / r.length) : 0, i.counts = Ye();
+			for (let e of r) i.counts[e.classification]++;
+			for (let e of [
+				"opening",
+				"middlegame",
+				"endgame"
+			]) {
+				let t = r.filter((t) => t.phase === e);
+				i.phases[e] = t.length ? t.reduce((e, t) => e + t.accuracy, 0) / t.length : null;
+			}
+		}
+	};
+	for (let e = 0; e <= d && !i.signal?.cancelled; e++) {
+		let t = X(new L(o[e]));
+		if (t) f[e] = t;
+		else {
+			let t = await n.search(o[e], m[e] ? G : u).promise;
+			if (i.signal?.cancelled) break;
+			p[e] = t, f[e] = t[0]?.score ?? {
+				type: "cp",
+				value: 0
+			};
+		}
+		e === 0 && (v.startEval = z(f[0], y(0))), e >= 1 && (v.moves.push(b(e - 1)), x()), i.onProgress?.(v, e, d);
+	}
+	return v.complete = v.moves.length === d, v.analyzedAt = Date.now(), v.complete && await U(Z(t, r, n.info.name), v, null), v;
+}
+function Xe(e) {
+	if (!e) return "";
+	if (e.type === "mate") return e.value === 0 ? "#" : `#${e.value > 0 ? "" : "-"}${Math.abs(e.value)}`;
+	if (Math.abs(e.value) >= 1e4) return "#";
+	let t = e.value / 100;
+	return `${t > 0 ? "+" : ""}${t.toFixed(Math.abs(t) >= 10 ? 0 : 1)}`;
+}
+export { we as CLASS_META, Ce as CLASS_ORDER, W as PRESETS, t as StockfishEngine, Q as analyzeGame, Xe as formatScore, Ae as hashString, Je as loadCachedReview, qe as parseGame, z as toWhitePov, J as uciLineToSan };

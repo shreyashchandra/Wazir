@@ -126,33 +126,11 @@
 
               <div class="control-group">
                 <span class="control-label">Depth</span>
-                <select id="depth" class="styled-select">
-                  <option value="16">16</option>
-                  <option value="18">18</option>
-                  <option value="20">20</option>
-                  <option value="22">22</option>
-                  <option value="24" selected>24</option>
-                </select>
-              </div>
-
-              <div class="control-group">
-                <span class="control-label">Time (ms)</span>
-                <input
-                  id="ms"
-                  type="number"
-                  class="styled-input"
-                  min="50"
-                  max="5000"
-                  value="500"
-                />
-              </div>
-
-              <div class="control-group">
-                <span class="control-label">MultiPV</span>
-                <select id="mpv" class="styled-select">
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                  <option value="3" selected>3</option>
+                <select id="preset" class="styled-select" title="Standard is calibrated against chess.com">
+                  <option value="fast">Quick · 12</option>
+                  <option value="standard" selected>Standard · 16</option>
+                  <option value="deep">Deep · 20</option>
+                  <option value="max">Max · 24</option>
                 </select>
               </div>
 

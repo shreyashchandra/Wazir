@@ -1,17 +1,20 @@
-// popup.js — Wazir Premium: Chess.com-accurate analysis engine (fixed POV + UCI)
-// DROP-IN FILE (PART 1/3). Copy-paste into popup.js, replacing your whole file.
-// Then ask me for PART 2/3.
+// popup.js — Wazir extension popup.
+// Analysis (engine, accuracy model, move classification) comes from the shared
+// core in lib/wazir-core.js, built from the website's src/lib by
+// `npm run build:extension` in web/. Do not edit wazir-core.js by hand.
 
 import { Chess } from "./lib/chess.js";
+import {
+  StockfishEngine,
+  analyzeGame,
+  CLASS_META,
+  hashString,
+} from "./lib/wazir-core.js";
 
 const API_ORIGIN = "https://chess-pgn-api.shreyash-chandra123.workers.dev";
 
 /* ============================================================
-   CHESS.COM ACCURACY MODEL (as you described)
-
-   - Win% = 50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
-   - Accuracy per move = 103.1668 * exp(-0.04354 * winLoss) - 3.1669
-   - Clamp [0, 100]
+   WIN% (eval bar / charts only; accuracy comes from the shared core)
    ============================================================ */
 
 function cpToWinPercent(cp) {
@@ -29,68 +32,6 @@ function evalToWinPercent(info) {
   if (!info) return 50;
   if (info.type === "mate") return mateToWinPercent(info.value);
   return cpToWinPercent(info.value);
-}
-
-// IMPORTANT: use moverWin% (not whiteWin% vs blackWin% branching)
-function winPercentToAccuracy(winBefore, winAfter) {
-  const winLoss = winBefore - winAfter;
-  if (winLoss <= 0) return 100;
-
-  const accuracy = 103.1668 * Math.exp(-0.04354 * winLoss) - 3.1669;
-  return Math.max(0, Math.min(100, accuracy));
-}
-
-function classifyMoveChessCom(
-  winLoss,
-  cpBefore,
-  cpAfter,
-  preTop,
-  playedInfo,
-  ply,
-) {
-  // Convert UCI score objects to a comparable cp scale.
-  const toCp = (info) => {
-    if (!info) return 0;
-    if (info.type === "cp") return info.value;
-    if (info.type === "mate") return info.value > 0 ? 1000 : -1000;
-    return 0;
-  };
-
-  // "Brilliant / Great" (still heuristic; correctness fixes happen elsewhere)
-  if (preTop && preTop.length >= 2 && playedInfo) {
-    const bestCp = toCp(preTop[0]);
-    const secondCp = toCp(preTop[1]);
-    const playedCp = toCp(playedInfo);
-
-    if (
-      winLoss <= 2 &&
-      bestCp - secondCp >= 150 &&
-      Math.abs(playedCp - bestCp) <= 20
-    ) {
-      return { tag: "brilliant", symbol: "!!" };
-    }
-
-    if (
-      winLoss <= 1 &&
-      bestCp - secondCp >= 100 &&
-      Math.abs(playedCp - bestCp) <= 10
-    ) {
-      return { tag: "great", symbol: "!" };
-    }
-  }
-
-  // Book (rough; real Chess.com uses opening DB)
-  if (ply <= 12 && Math.abs(cpBefore) <= 30 && Math.abs(cpAfter) <= 30) {
-    return { tag: "book", symbol: "" };
-  }
-
-  // Classification by mover win% loss
-  if (winLoss <= 2) return { tag: "best", symbol: "" };
-  if (winLoss <= 5) return { tag: "excellent", symbol: "" };
-  if (winLoss <= 10) return { tag: "good", symbol: "" };
-  if (winLoss <= 15) return { tag: "inaccuracy", symbol: "?!" };
-  if (winLoss <= 25) return { tag: "mistake", symbol: "?" };
-  return { tag: "blunder", symbol: "??" };
 }
 
 /* ============================================================
@@ -118,9 +59,7 @@ const btnAuto = $("#btn-auto");
 const btnAnalyze = $("#btn-analyze");
 const btnBoard = $("#btn-board");
 const pgnInput = $("#pgn-input");
-const depthEl = $("#depth");
-const msEl = $("#ms");
-const mpvEl = $("#mpv");
+const presetEl = $("#preset");
 const progressBar = $("#progress-bar");
 const progressText = $("#progress-text");
 
@@ -173,17 +112,9 @@ const COLORS = {
   arrowBlue: "rgba(92, 155, 237, 0.85)",
 };
 
-const TAG_COLORS = {
-  brilliant: "#1baca6",
-  great: "#5c8bb0",
-  best: "#96bc4b",
-  excellent: "#96bc4b",
-  good: "#97af8b",
-  book: "#a88865",
-  inaccuracy: "#f7c631",
-  mistake: "#e6912c",
-  blunder: "#ca3431",
-};
+const TAG_COLORS = Object.fromEntries(
+  Object.entries(CLASS_META).map(([k, v]) => [k, v.color]),
+);
 
 const TAG_ICONS = {
   brilliant: "💎",
@@ -192,109 +123,54 @@ const TAG_ICONS = {
   excellent: "✓",
   good: "",
   book: "📖",
+  forced: "→",
   inaccuracy: "?!",
   mistake: "?",
+  miss: "✕",
   blunder: "??",
 };
 
 /* ============================================================
-   ENGINE MANAGEMENT
+   ENGINE (shared Stockfish 19 wrapper)
+   Multi-threaded when the popup is cross-origin isolated (see the
+   cross_origin_* keys in manifest.json), single-threaded otherwise.
    ============================================================ */
 
-let engine = null;
-let engineReady = false;
-let currentMultiPV = 3;
+let enginePromise = null;
 
-const ENGINE_TIMEOUT = 8000;
-
-function initEngine() {
-  if (engine) return;
-  engineReady = false;
-
-  try {
-    engine = new Worker(
-      chrome.runtime.getURL("stockfish/stockfish-17.1-lite-single-03e3232.js"),
-    );
-  } catch (err) {
-    console.error("Engine init failed:", err);
-    setProgress("Engine failed to start", 0);
-    return;
+function getEngine() {
+  if (!enginePromise) {
+    enginePromise = StockfishEngine.create("lite", undefined, {
+      scriptBase: chrome.runtime.getURL("stockfish/"),
+    });
+    enginePromise
+      .then((e) =>
+        console.info(
+          `[wazir] ${e.info.name}, ${e.info.threads} thread(s), ${e.info.hashMb} MB hash`,
+        ),
+      )
+      .catch((err) => {
+        console.error("Engine init failed:", err);
+        setProgress("Engine failed to start", 0);
+        enginePromise = null;
+      });
   }
+  return enginePromise;
+}
 
-  engine.addEventListener("message", (e) => {
-    const line = typeof e.data === "string" ? e.data : e.data?.data;
-    if (!line) return;
-
-    if (line.includes("uciok")) {
-      post("setoption name Threads value 1");
-      post("setoption name Hash value 64");
-      post(`setoption name MultiPV value ${currentMultiPV}`);
-      post("isready");
-    } else if (line.includes("readyok")) {
-      engineReady = true;
-      setProgress("Engine ready", 0);
-    }
-  });
-
-  engine.onerror = (ev) => {
-    console.error("Engine error:", ev);
-    setProgress("Engine error", 0);
-  };
-
-  engine.postMessage("uci");
+// Warm the engine up as soon as the popup opens.
+function initEngine() {
+  getEngine();
 }
 
 function shutdownEngine() {
-  if (!engine) return;
-  try {
-    engine.terminate();
-  } catch (e) {}
-  engine = null;
-  engineReady = false;
-}
-
-function post(cmd) {
-  if (engine) engine.postMessage(cmd);
-}
-
-function waitEngineReady(timeout = 7000) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const check = setInterval(() => {
-      if (engineReady) {
-        clearInterval(check);
-        resolve(true);
-      } else if (Date.now() - start > timeout) {
-        clearInterval(check);
-        resolve(false);
-      }
-    }, 50);
-  });
+  enginePromise?.then((e) => e.terminate()).catch(() => {});
+  enginePromise = null;
 }
 
 /* ============================================================
    UCI PARSING + POV FIXES (THE CORE BUG FIX)
    ============================================================ */
-
-// Robust: handles lines WITH or WITHOUT "multipv"
-function parseUciInfo(line) {
-  if (!line.startsWith("info ")) return null;
-
-  const scoreMatch = line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
-  if (!scoreMatch) return null;
-
-  const mpvMatch = line.match(/\bmultipv\s+(\d+)/);
-  const pvMatch = line.match(/\bpv\s+(.+)$/);
-  const depthMatch = line.match(/\bdepth\s+(\d+)/);
-
-  return {
-    multipv: mpvMatch ? parseInt(mpvMatch[1], 10) : 1,
-    type: scoreMatch[1],
-    value: parseInt(scoreMatch[2], 10),
-    pv: pvMatch ? pvMatch[1].trim().split(/\s+/) : [],
-    depth: depthMatch ? parseInt(depthMatch[1], 10) : 0,
-  };
-}
 
 function flipEval(info) {
   if (!info) return null;
@@ -308,126 +184,25 @@ function evalFromWhitePov(info, sideToMove) {
   return sideToMove === "w" ? info : flipEval(info);
 }
 
-function toCpWhite(info) {
-  if (!info) return 0;
-  if (info.type === "cp") return info.value;
-  if (info.type === "mate") return info.value > 0 ? 1000 : -1000;
-  return 0;
-}
-
-// Convert a White-POV cp into mover-POV cp (mover is sideToMove at root)
-function toMoverCpFromWhiteCp(cpWhite, sideToMove) {
-  return sideToMove === "w" ? cpWhite : -cpWhite;
-}
-
-function moverWinPercentFromWhiteEval(whiteEvalInfo, sideToMove) {
-  const whiteWin = evalToWinPercent(whiteEvalInfo);
-  return sideToMove === "w" ? whiteWin : 100 - whiteWin;
-}
-
 /* ============================================================
-   ENGINE QUERIES
+   ENGINE QUERIES (custom positions on the board)
+   Returns infos in side-to-move POV: { multipv, type, value, pv, depth }.
    ============================================================ */
 
-function analyzePosition(fen, opts, multipv) {
-  return new Promise((resolve) => {
-    if (!engine) return resolve([]);
-
-    /** @type {Record<number, any>} */
-    const results = {};
-    let resolved = false;
-
-    const handler = (e) => {
-      const line = typeof e.data === "string" ? e.data : e.data?.data;
-      if (!line || resolved) return;
-
-      if (line.startsWith("info ") && line.includes("score")) {
-        const info = parseUciInfo(line);
-        if (info && info.multipv <= multipv) {
-          const prev = results[info.multipv];
-          if (!prev || info.depth >= prev.depth) {
-            results[info.multipv] = info;
-          }
-        }
-      } else if (line.startsWith("bestmove ")) {
-        resolved = true;
-        engine.removeEventListener("message", handler);
-        clearTimeout(tid);
-        resolve(Object.values(results).sort((a, b) => a.multipv - b.multipv));
-      }
-    };
-
-    engine.addEventListener("message", handler);
-
-    const tid = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try {
-        engine.removeEventListener("message", handler);
-      } catch (e) {}
-      resolve(Object.values(results).sort((a, b) => a.multipv - b.multipv));
-    }, ENGINE_TIMEOUT);
-
-    post(`position fen ${fen}`);
-
-    if (multipv !== currentMultiPV) {
-      post(`setoption name MultiPV value ${multipv}`);
-      currentMultiPV = multipv;
-    }
-
-    if (opts.movetime) post(`go movetime ${opts.movetime}`);
-    else post(`go depth ${opts.depth}`);
-  });
-}
-
-function analyzeMove(fen, moveObj, opts) {
-  return new Promise((resolve) => {
-    if (!engine) return resolve(null);
-
-    const uci = moveObj.from + moveObj.to + (moveObj.promotion || "");
-    let result = null;
-    let resolved = false;
-
-    const handler = (e) => {
-      const line = typeof e.data === "string" ? e.data : e.data?.data;
-      if (!line || resolved) return;
-
-      if (line.startsWith("info ") && line.includes("score")) {
-        const info = parseUciInfo(line);
-        if (info) result = info;
-      } else if (line.startsWith("bestmove ")) {
-        resolved = true;
-        engine.removeEventListener("message", handler);
-        clearTimeout(tid);
-        resolve(result);
-      }
-    };
-
-    engine.addEventListener("message", handler);
-
-    const tid = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try {
-        engine.removeEventListener("message", handler);
-      } catch (e) {}
-      resolve(result);
-    }, ENGINE_TIMEOUT);
-
-    post(`position fen ${fen}`);
-
-    // Searchmoves analysis is cleaner with MultiPV=1
-    if (currentMultiPV !== 1) {
-      post("setoption name MultiPV value 1");
-      currentMultiPV = 1;
-    }
-
-    if (opts.movetime) {
-      post(`go movetime ${opts.movetime} searchmoves ${uci}`);
-    } else {
-      post(`go depth ${opts.depth} searchmoves ${uci}`);
-    }
-  });
+async function analyzePosition(fen, opts, multipv) {
+  const engine = await getEngine();
+  const lines = await engine.search(fen, {
+    depth: opts.depth,
+    multipv,
+    movetime: opts.movetime,
+  }).promise;
+  return lines.map((l) => ({
+    multipv: l.multipv,
+    type: l.score.type,
+    value: l.score.value,
+    pv: l.pv,
+    depth: l.depth,
+  }));
 }
 
 /* ============================================================
@@ -485,163 +260,66 @@ function extractMoves(pgn) {
 
 let lastAnalysis = null;
 
-async function runAnalysis(pgn, opts) {
-  const headers = parseHeaders(pgn);
-  const sanMoves = extractMoves(pgn);
+async function runAnalysis(pgn, preset) {
+  const engine = await getEngine();
+  setProgress(`Analyzing… (${engine.info.threads} thread${engine.info.threads > 1 ? "s" : ""})`, 0);
+  const review = await analyzeGame(pgn, `ext:${hashString(pgn)}`, engine, preset, {
+    onProgress: (_r, done, total) =>
+      setProgress(`Analyzing move ${Math.min(done, total)}/${total}`, Math.round((done / Math.max(1, total)) * 100)),
+  });
+  setProgress("Analysis complete", 100);
+  return toPopupAnalysis(review, pgn);
+}
 
-  if (!sanMoves.length) {
-    throw new Error("No moves found in PGN");
-  }
+/** Maps a shared GameReview onto the shape the popup's renderers expect. */
+function toPopupAnalysis(review, pgn) {
+  const info = (line, multipv) =>
+    line ? { multipv, type: line.score.type, value: line.score.value, pv: line.uci, depth: line.depth } : null;
 
-  let startFen;
-  if (headers.SetUp === "1" && headers.FEN) {
-    startFen = headers.FEN;
-  }
-
-  const game = new Chess(startFen);
-  const perMove = [];
-  const sides = { w: [], b: [] };
-  const total = sanMoves.length;
-
-  post("ucinewgame");
-
-  for (let i = 0; i < total; i++) {
-    const san = sanMoves[i];
-    const fenBefore = game.fen();
-    const stm = game.turn(); // 'w' or 'b'
-
-    // Analyze the position BEFORE the move (best lines)
-    const preTopRoot = await analyzePosition(
-      fenBefore,
-      opts,
-      opts.multipv || 3,
-    );
-
-    const bestInfoRoot = preTopRoot[0] || null;
-
-    // Convert best eval to White POV for consistent display
-    const bestInfoWhite = evalFromWhitePov(bestInfoRoot, stm);
-    const bestCpWhite = toCpWhite(bestInfoWhite);
-    const bestCpMover = toMoverCpFromWhiteCp(bestCpWhite, stm);
-    const winBefore = moverWinPercentFromWhiteEval(bestInfoWhite, stm);
-
-    // Parse/validate SAN
-    const testGame = new Chess(fenBefore);
-    const moveObj = testGame.move(san, { sloppy: true });
-    if (!moveObj) {
-      console.warn(`Invalid move at ply ${i + 1}: ${san}`);
-      break;
-    }
-
-    // Evaluate the PLAYED move using searchmoves
-    const playedInfoRoot = await analyzeMove(fenBefore, moveObj, opts);
-    const playedInfoWhite = evalFromWhitePov(playedInfoRoot, stm);
-    const playedCpWhite = toCpWhite(playedInfoWhite);
-    const playedCpMover = toMoverCpFromWhiteCp(playedCpWhite, stm);
-    const winAfter = moverWinPercentFromWhiteEval(playedInfoWhite, stm);
-
-    // Make the move on the main game
-    game.move(moveObj);
-
-    const winLoss = Math.max(0, winBefore - winAfter);
-    const moveAccuracy = winPercentToAccuracy(winBefore, winAfter);
-
-    // Convert PV lines to White POV for consistent downstream usage
-    const preTopWhite = (preTopRoot || []).map((line) =>
-      evalFromWhitePov(line, stm),
-    );
-
-    const classification = classifyMoveChessCom(
-      winLoss,
-      bestCpWhite,
-      playedCpWhite,
-      preTopWhite,
-      playedInfoWhite,
-      i + 1,
-    );
-
-    // Build PV map (White POV)
-    const pvMap = {};
-    for (const line of preTopWhite) {
-      pvMap[line.multipv] = line;
-    }
-
-    const entry = {
-      ply: i + 1,
-      color: stm === "w" ? "white" : "black",
-      san,
-      uci: moveObj.from + moveObj.to + (moveObj.promotion || ""),
-      fenBefore,
-      fenAfter: game.fen(),
-
-      // Always White POV in stored analysis
-      evalBefore: bestInfoWhite,
-      evalAfter: playedInfoWhite,
-
-      // Mover win% (not always White)
-      winBefore,
-      winAfter,
-      winLoss,
-
-      accuracy: moveAccuracy,
-
-      // ACPL-ish: loss in mover POV (so black is correct)
-      cpLoss: Math.max(0, bestCpMover - playedCpMover),
-
-      tag: classification.tag,
-      symbol: classification.symbol,
-
-      // PV lines stored as White POV
-      pvLines: pvMap,
-
-      // Still keep bestMove UCI from root PV (UCI is same regardless of POV)
-      bestMove: bestInfoRoot?.pv?.[0] || null,
-
-      from: moveObj.from,
-      to: moveObj.to,
-    };
-
-    perMove.push(entry);
-    sides[stm].push(entry);
-
-    const pct = Math.round(((i + 1) / total) * 100);
-    setProgress(`Analyzing move ${i + 1}/${total}`, pct);
-  }
-
-  const calcStats = (arr) => {
-    if (!arr.length) return { accuracy: 0, acpl: 0, counts: {} };
-
-    const avgAccuracy =
-      arr.reduce((sum, m) => sum + (m.accuracy || 0), 0) / arr.length;
-
-    const avgCpLoss =
-      arr.reduce((sum, m) => sum + (m.cpLoss || 0), 0) / arr.length;
-
-    const counts = {
-      brilliant: arr.filter((m) => m.tag === "brilliant").length,
-      great: arr.filter((m) => m.tag === "great").length,
-      best: arr.filter((m) => m.tag === "best").length,
-      excellent: arr.filter((m) => m.tag === "excellent").length,
-      good: arr.filter((m) => m.tag === "good").length,
-      book: arr.filter((m) => m.tag === "book").length,
-      inaccuracy: arr.filter((m) => m.tag === "inaccuracy").length,
-      mistake: arr.filter((m) => m.tag === "mistake").length,
-      blunder: arr.filter((m) => m.tag === "blunder").length,
-    };
-
+  let prevAfter = review.startEval ? { multipv: 1, ...review.startEval, pv: [] } : null;
+  const perMove = review.moves.map((m) => {
+    const pvLines = {};
+    m.lines.forEach((l, i) => (pvLines[i + 1] = info(l, i + 1)));
+    const evalBefore = pvLines[1] || prevAfter; // White POV
+    const evalAfter = { multipv: 1, ...m.evalAfter, pv: [] };
+    prevAfter = evalAfter;
     return {
-      accuracy: Math.round(avgAccuracy * 10) / 10,
-      acpl: Math.round(avgCpLoss),
-      counts,
+      ply: m.ply,
+      color: m.color === "w" ? "white" : "black",
+      san: m.san,
+      uci: m.uci,
+      fenBefore: m.fenBefore,
+      fenAfter: m.fenAfter,
+      evalBefore,
+      evalAfter,
+      winBefore: m.winBefore,
+      winAfter: m.winAfter,
+      winLoss: m.winLoss,
+      accuracy: m.accuracy,
+      cpLoss: m.cpLoss,
+      tag: m.classification,
+      symbol: CLASS_META[m.classification].glyph,
+      pvLines,
+      bestMove: m.bestUci,
+      from: m.from,
+      to: m.to,
     };
-  };
+  });
+
+  const side = (s) => ({
+    accuracy: s.accuracy === null ? 0 : Math.round(s.accuracy * 10) / 10,
+    acpl: s.acpl,
+    counts: s.counts,
+  });
 
   return {
-    headers,
-    startFen,
+    headers: review.headers,
+    startFen: review.startFen === "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" ? undefined : review.startFen,
     perMove,
-    white: calcStats(sides.w),
-    black: calcStats(sides.b),
+    white: side(review.white),
+    black: side(review.black),
+    opening: review.opening,
+    engine: review.engine,
     pgn,
   };
 }
@@ -671,8 +349,10 @@ function renderBadges(container, counts) {
     ["excellent", "✓"],
     ["good", "○"],
     ["book", "📖"],
+    ["forced", "→"],
     ["inaccuracy", "?!"],
     ["mistake", "?"],
+    ["miss", "✕"],
     ["blunder", "??"],
   ];
 
@@ -1476,7 +1156,7 @@ async function analyzeCustomPosition() {
   if (bestMoveSan) bestMoveSan.textContent = "...";
   if (pvLine) pvLine.textContent = "Analyzing...";
 
-  const results = await analyzePosition(fen, { depth: 24, movetime: 500 }, 3);
+  const results = await analyzePosition(fen, { depth: 20, movetime: 1500 }, 3);
   if (results.length > 0 && isCustomMode && customFen === boardGame.fen()) {
     const bestInfoRoot = results[0];
     const bestInfoWhite = evalFromWhitePov(bestInfoRoot, stm);
@@ -1601,22 +1281,9 @@ if (btnAnalyze) {
     }
 
     try {
-      initEngine();
       setProgress("Starting engine...", 0);
-
-      const ready = await waitEngineReady();
-      if (!ready) {
-        setProgress("Engine failed to start", 0);
-        return;
-      }
-
-      const opts = {
-        depth: parseInt(depthEl?.value || "24", 10),
-        movetime: parseInt(msEl?.value || "500", 10),
-        multipv: parseInt(mpvEl?.value || "3", 10),
-      };
-
-      const analysis = await runAnalysis(pgn, opts);
+      const preset = presetEl?.value || "standard";
+      const analysis = await runAnalysis(pgn, preset);
       lastAnalysis = analysis;
       renderSummary(analysis);
     } catch (e) {
